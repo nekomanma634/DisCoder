@@ -1,0 +1,9 @@
+# セキュリティ: APIトークンなどの環境変数
+.env
+
+# Goのビルド生成物
+*.exe
+discoder-backend
+
+# 提出されたコードの保存先（個人情報やコードの流出防止）
+submissions/
