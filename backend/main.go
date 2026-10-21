@@ -67,7 +67,7 @@ func main() {
 		go judgeWorker(dg, filename, problemQueues[filename])
 	}
 
-	// --- 変更: スラッシュコマンド用のハンドラを登録 ---
+	// スラッシュコマンド用のハンドラを登録
 	dg.AddHandler(interactionCreate)
 
 	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent | discordgo.IntentsDirectMessages
@@ -78,24 +78,34 @@ func main() {
 	}
 	defer dg.Close()
 
-	// --- 追加: Bot起動時にスラッシュコマンドをDiscordへ登録する ---
-	cmd := &discordgo.ApplicationCommand{
-		Name:        "submit",
-		Description: "ソースコードを提出します",
-		Options: []*discordgo.ApplicationCommandOption{
-			{
-				Type:        discordgo.ApplicationCommandOptionAttachment,
-				Name:        "file",
-				Description: "提出するファイル",
-				Required:    true,
+	// --- 変更: 複数のスラッシュコマンドを登録する ---
+	commands := []*discordgo.ApplicationCommand{
+		{
+			Name:        "submit",
+			Description: "ソースコードを提出します",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionAttachment,
+					Name:        "file",
+					Description: "提出するファイル",
+					Required:    true,
+				},
 			},
 		},
+		{
+			Name:        "hello",
+			Description: "BotとのDM（ダイレクトメッセージ）を開始します",
+		},
 	}
-	_, err = dg.ApplicationCommandCreate(dg.State.User.ID, "", cmd)
-	if err != nil {
-		log.Panicf("スラッシュコマンドの作成に失敗しました: %v", err)
+
+	// コマンドを一括で登録
+	for _, cmd := range commands {
+		_, err = dg.ApplicationCommandCreate(dg.State.User.ID, "", cmd)
+		if err != nil {
+			log.Panicf("スラッシュコマンド '%s' の作成に失敗しました: %v", cmd.Name, err)
+		}
 	}
-	log.Println("スラッシュコマンド '/submit' を登録しました。")
+	log.Println("スラッシュコマンドの登録が完了しました。")
 
 	fmt.Println("Botが起動しました！終了するには CTRL-C を押してください。")
 	
@@ -104,19 +114,14 @@ func main() {
 	<-sc
 }
 
-// --- 変更: メッセージではなく「インタラクション（スラッシュコマンド）」を受け取る関数 ---
 func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// スラッシュコマンド以外は無視
 	if i.Type != discordgo.InteractionApplicationCommand {
 		return
 	}
 
 	data := i.ApplicationCommandData()
-	if data.Name != "submit" {
-		return
-	}
 
-	// コマンド実行者を取得（サーバーからか、DMからかで参照場所が異なります）
+	// コマンド実行者を取得
 	var user *discordgo.User
 	if i.Member != nil {
 		user = i.Member.User
@@ -124,85 +129,102 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		user = i.User
 	}
 
-	// --- ポイント: 実行したチャンネルに「自分だけに見えるメッセージ（Ephemeral）」を返す ---
-	// これにより「処理中...」という文字がチャンネルを汚さず、実行者にだけ見えます
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: "提出処理を開始しました!!",
-			Flags:   discordgo.MessageFlagsEphemeral,
-		},
-	})
-
+	// DMチャンネルをあらかじめ取得しておく
 	dmChannel, err := s.UserChannelCreate(user.ID)
 	if err != nil {
 		log.Println("DMチャンネル作成エラー:", err)
 		return
 	}
 
-	// スラッシュコマンドで添付されたファイルを取得
-	var attachment *discordgo.MessageAttachment
-	for _, att := range data.Resolved.Attachments {
-		attachment = att
-		break
-	}
+	// --- 変更: コマンド名(data.Name)によって処理を分岐する ---
+	switch data.Name {
 
-	if attachment == nil {
-		s.ChannelMessageSend(dmChannel.ID, "エラー: ファイルが添付されていません。")
-		return
-	}
+	case "hello":
+		// チャンネル上には実行者だけに見えるメッセージを返す
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "DMにメッセージを送信しました！確認してください。",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
 
-	allowedFiles := os.Getenv("ALLOWED_FILENAMES")
-	if allowedFiles != "" {
-		isValidFile := false
-		for _, allowed := range strings.Split(allowedFiles, ",") {
-			if attachment.Filename == strings.TrimSpace(allowed) {
-				isValidFile = true
-				break
+		// ユーザーのDMへ挨拶メッセージを送信
+		greetingMsg := fmt.Sprintf("こんにちは、%sさん！\nDiscoderのコンテストシステムへようこそ。\nコードを提出する際は、このDMで `/submit` と入力するか、サーバーのチャンネルで実行してください！", user.Username)
+		s.ChannelMessageSend(dmChannel.ID, greetingMsg)
+
+	case "submit":
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "提出処理を開始しました。以降の通知はDMを確認してください！",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+
+		var attachment *discordgo.MessageAttachment
+		for _, att := range data.Resolved.Attachments {
+			attachment = att
+			break
+		}
+
+		if attachment == nil {
+			s.ChannelMessageSend(dmChannel.ID, "エラー: ファイルが添付されていません。")
+			return
+		}
+
+		allowedFiles := os.Getenv("ALLOWED_FILENAMES")
+		if allowedFiles != "" {
+			isValidFile := false
+			for _, allowed := range strings.Split(allowedFiles, ",") {
+				if attachment.Filename == strings.TrimSpace(allowed) {
+					isValidFile = true
+					break
+				}
+			}
+
+			if !isValidFile {
+				errMsg := fmt.Sprintf("エラー: 提出できるファイル名は `%s` のみです。\nあなたの提出ファイル: `%s`", allowedFiles, attachment.Filename)
+				s.ChannelMessageSend(dmChannel.ID, errMsg)
+				return
 			}
 		}
 
-		if !isValidFile {
-			errMsg := fmt.Sprintf("エラー: 提出できるファイル名は `%s` のみです。\nあなたの提出ファイル: `%s`", allowedFiles, attachment.Filename)
-			s.ChannelMessageSend(dmChannel.ID, errMsg)
+		userDirName := fmt.Sprintf("%s_%s", user.Username, user.ID)
+		submitDir := filepath.Join("submissions", userDirName)
+
+		if err := os.MkdirAll(submitDir, os.ModePerm); err != nil {
+			s.ChannelMessageSend(dmChannel.ID, "サーバーエラー: 保存先ディレクトリを作成できませんでした。")
 			return
 		}
-	}
 
-	userDirName := fmt.Sprintf("%s_%s", user.Username, user.ID)
-	submitDir := filepath.Join("submissions", userDirName)
+		filePath := filepath.Join(submitDir, attachment.Filename)
 
-	if err := os.MkdirAll(submitDir, os.ModePerm); err != nil {
-		s.ChannelMessageSend(dmChannel.ID, "サーバーエラー: 保存先ディレクトリを作成できませんでした。")
-		return
-	}
+		err = downloadAttachment(attachment.URL, filePath)
+		if err != nil {
+			s.ChannelMessageSend(dmChannel.ID, "エラー: ファイルの保存に失敗しました。")
+			log.Println("ダウンロードエラー:", err)
+			return
+		}
 
-	filePath := filepath.Join(submitDir, attachment.Filename)
+		now := time.Now()
+		log.Printf("[SUBMIT] User: %s (ID: %s), File: %s, Path: %s\n", user.Username, user.ID, attachment.Filename, filePath)
 
-	err = downloadAttachment(attachment.URL, filePath)
-	if err != nil {
-		s.ChannelMessageSend(dmChannel.ID, "エラー: ファイルの保存に失敗しました。")
-		log.Println("ダウンロードエラー:", err)
-		return
-	}
+		submissionData := Submission{
+			UserID:      user.ID,
+			Username:    user.Username,
+			Filename:    attachment.Filename,
+			FilePath:    filePath,
+			DMChannelID: dmChannel.ID,
+			SubmittedAt: now,
+		}
 
-	now := time.Now()
-	log.Printf("[SUBMIT] User: %s (ID: %s), File: %s, Path: %s\n", user.Username, user.ID, attachment.Filename, filePath)
+		msg := fmt.Sprintf("提出を受け付けました！\nファイル名: `%s`\n現在ジャッジの順番待ちキューに入っています...", attachment.Filename)
+		s.ChannelMessageSend(dmChannel.ID, msg)
 
-	submissionData := Submission{
-		UserID:      user.ID,
-		Username:    user.Username,
-		Filename:    attachment.Filename,
-		FilePath:    filePath,
-		DMChannelID: dmChannel.ID,
-		SubmittedAt: now,
-	}
-
-	msg := fmt.Sprintf("提出を受け付けました！\nファイル名: `%s`\n現在ジャッジの順番待ちキューに入っています...", attachment.Filename)
-	s.ChannelMessageSend(dmChannel.ID, msg)
-
-	if q, exists := problemQueues[attachment.Filename]; exists {
-		q <- submissionData
+		if q, exists := problemQueues[attachment.Filename]; exists {
+			q <- submissionData
+		}
 	}
 }
 
