@@ -29,6 +29,45 @@ func registerCommands(dg *discordgo.Session) {
 			Name:        "hello",
 			Description: "BotとのDM（ダイレクトメッセージ）を開始します",
 		},
+		{
+			Name:        "register",
+			Description: "Discoderシステムにユーザー登録します",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "username",
+					Description: "コンテストで使用するユーザー名（半角英数字など）",
+					Required:    true, // 必須入力にする
+				},
+			},
+		},
+		{
+			Name:        "profile",
+			Description: "自分の登録情報と現在の権限（ロール）を確認します",
+		},
+		{
+			Name:        "setrole",
+			Description: "【Admin専用】ユーザーの権限(staff等)を変更します",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionUser,
+					Name:        "target",
+					Description: "権限を変更するユーザー",
+					Required:    true,
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "role",
+					Description: "付与する権限 (admin / staff / user)",
+					Required:    true,
+					Choices: []*discordgo.ApplicationCommandOptionChoice{
+						{Name: "Admin (管理者)", Value: "admin"},
+						{Name: "Staff (運営)", Value: "staff"},
+						{Name: "User (一般参加者)", Value: "user"},
+					},
+				},
+			},
+		},
 	}
 
 	for _, cmd := range commands {
@@ -61,6 +100,12 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		handleHello(s, i, user, dmChannel.ID)
 	case "submit":
 		handleSubmit(s, i, user, dmChannel.ID, data)
+	case "register":
+		handleRegister(s, i, user, data)
+	case "profile":
+		handleProfile(s, i, user)
+	case "setrole":
+		handleSetRole(s, i, user, data)
 	}
 }
 
@@ -145,4 +190,91 @@ func handleSubmit(s *discordgo.Session, i *discordgo.InteractionCreate, user *di
 	if q, exists := problemQueues[attachment.Filename]; exists {
 		q <- submissionData
 	}
+}
+
+func handleRegister(s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, data discordgo.ApplicationCommandInteractionData) {
+	_, isRegistered, err := getUserRole(user.ID)
+	if err != nil {
+		respondEphemeral(s, i, "データベースエラーが発生しました。")
+		return
+	}
+	if isRegistered {
+		respondEphemeral(s, i, "既に登録されています！ `/profile` コマンドで情報を確認してください。")
+		return
+	}
+
+	// ユーザーが入力した任意のユーザー名を取得
+	customUsername := data.Options[0].StringValue()
+
+	role := "user"
+	if user.ID == os.Getenv("OWNER_ID") {
+		role = "admin"
+	}
+
+	if err := registerUserToDB(user.ID, customUsername, role); err != nil {
+		log.Println("ユーザー登録エラー:", err)
+		respondEphemeral(s, i, "登録中にエラーが発生しました。")
+		return
+	}
+
+	// Discordのロールを自動付与
+	go syncDiscordRole(s, i.GuildID, user.ID, role)
+
+	msg := fmt.Sprintf("✅ 登録が完了しました！\nシステム内のユーザー名: `%s`\n付与されたロール: `%s`", customUsername, role)
+	respondEphemeral(s, i, msg)
+}
+
+func handleSetRole(s *discordgo.Session, i *discordgo.InteractionCreate, executor *discordgo.User, data discordgo.ApplicationCommandInteractionData) {
+	// 実行者がAdminかどうかチェック
+	executorRole, isReg, err := getUserRole(executor.ID)
+	if err != nil || !isReg || executorRole != "admin" {
+		respondEphemeral(s, i, "⛔ 権限がありません。このコマンドはAdmin専用です。")
+		return
+	}
+
+	targetUser := data.Options[0].UserValue(s)
+	newRole := data.Options[1].StringValue()
+
+	// 対象者がDBにいるか確認
+	_, isTargetReg, err := getUserRole(targetUser.ID)
+	if err != nil || !isTargetReg {
+		respondEphemeral(s, i, "対象のユーザーはまだDiscoderシステムに `/register` していません。")
+		return
+	}
+
+	// DB更新
+	if err := updateUserRole(targetUser.ID, newRole); err != nil {
+		respondEphemeral(s, i, "データベースの更新に失敗しました。")
+		return
+	}
+
+	// Discordロールも同期
+	go syncDiscordRole(s, i.GuildID, targetUser.ID, newRole)
+
+	respondEphemeral(s, i, fmt.Sprintf("✅ %s さんの権限を `%s` に変更しました。", targetUser.Username, newRole))
+}
+
+func handleProfile(s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User) {
+	role, isRegistered, err := getUserRole(user.ID)
+	if err != nil {
+		respondEphemeral(s, i, "データベースエラーが発生しました。")
+		return
+	}
+	if !isRegistered {
+		respondEphemeral(s, i, "未登録です。先に `/register` を実行してください。")
+		return
+	}
+	msg := fmt.Sprintf("👤 **あなたのプロフィール**\nDiscord ID: `%s`\nロール: `%s`", user.ID, role)
+	respondEphemeral(s, i, msg)
+}
+
+// チャンネルを汚さない（実行者にのみ見える）レスポンス用のヘルパー関数
+func respondEphemeral(s *discordgo.Session, i *discordgo.InteractionCreate, content string) {
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: content,
+			Flags:   discordgo.MessageFlagsEphemeral,
+		},
+	})
 }

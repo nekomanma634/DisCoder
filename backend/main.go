@@ -19,6 +19,9 @@ func main() {
 		log.Println("Warning: .envファイルが見つかりません。")
 	}
 
+	initDB()
+	defer db.Close()
+
 	token := os.Getenv("DISCORD_TOKEN")
 	if token == "" {
 		log.Fatal("エラー: DISCORD_TOKEN が設定されていません。")
@@ -34,7 +37,13 @@ func main() {
 
 	// イベントハンドラの登録とIntent設定
 	dg.AddHandler(interactionCreate)
-	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent | discordgo.IntentsDirectMessages
+
+	dg.AddHandler(func(s *discordgo.Session, m *discordgo.GuildMemberAdd) {
+		log.Printf("[JOIN] %s さんがサーバーに参加しました。未設定ロールを付与します。\n", m.User.Username)
+		syncDiscordRole(s, m.GuildID, m.User.ID, "未設定")
+	})
+
+	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent | discordgo.IntentsDirectMessages | discordgo.IntentsGuildMembers
 
 	if err := dg.Open(); err != nil {
 		log.Fatal("Discordへの接続に失敗しました:", err)
