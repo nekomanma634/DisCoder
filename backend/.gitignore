@@ -9,3 +9,4 @@ discoder-backend
 submissions/
 
 *.log
+*.db
