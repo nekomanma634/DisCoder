@@ -1,11 +1,13 @@
 package main
 
 import (
+	"archive/zip"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
@@ -129,4 +131,54 @@ func syncDiscordRole(s *discordgo.Session, guildID string, userID string, roleNa
 			return
 		}
 	}
+}
+
+func unzip(src string, dest string) error {
+	r, err := zip.OpenReader(src)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+
+	for _, f := range r.File {
+		// zip内ファイルの保存先パスを生成
+		fpath := filepath.Join(dest, f.Name)
+
+		// ディレクトリトラバーサル（Zip Slip）攻撃対策
+		if !strings.HasPrefix(fpath, filepath.Clean(dest)+string(os.PathSeparator)) {
+			return fmt.Errorf("不正なファイルパスが含まれています: %s", fpath)
+		}
+
+		// ディレクトリの場合は作成して次へ
+		if f.FileInfo().IsDir() {
+			os.MkdirAll(fpath, os.ModePerm)
+			continue
+		}
+
+		// ファイルが格納されるディレクトリがまだ無ければ作成
+		if err = os.MkdirAll(filepath.Dir(fpath), os.ModePerm); err != nil {
+			return err
+		}
+
+		// ファイルを展開して書き込む
+		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		if err != nil {
+			return err
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			outFile.Close()
+			return err
+		}
+
+		_, err = io.Copy(outFile, rc)
+		outFile.Close()
+		rc.Close()
+
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

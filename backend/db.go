@@ -28,8 +28,20 @@ func initDB() {
 	);`
 
 	if _, err := db.Exec(createTableSQL); err != nil {
-		log.Fatal("テーブルの作成に失敗しました:", err)
+		log.Fatal("ユーザーテーブルの作成に失敗しました:", err)
 	}
+
+	createProblemsTableSQL := `CREATE TABLE IF NOT EXISTS problems (
+		name TEXT PRIMARY KEY,
+		title TEXT NOT NULL,
+		author_id TEXT NOT NULL,
+		created_at DATETIME NOT NULL
+	);`
+
+	if _, err := db.Exec(createProblemsTableSQL); err != nil {
+		log.Fatal("問題テーブルの作成に失敗しました:", err)
+	}
+
 	log.Println("データベース (SQLite) の初期化が完了しました。")
 }
 
@@ -57,4 +69,46 @@ func getUserRole(discordID string) (string, bool, error) {
 func updateUserRole(discordID, newRole string) error {
 	_, err := db.Exec("UPDATE users SET role = ? WHERE discord_id = ?", newRole, discordID)
 	return err
+}
+
+// 問題の登録
+func registerProblemToDB(name, title, authorID string) error {
+	insertSQL := `INSERT INTO problems (name, title, author_id, created_at) VALUES (?, ?, ?, ?)`
+	_, err := db.Exec(insertSQL, name, title, authorID, time.Now())
+	return err
+}
+
+// 問題が存在するかチェック
+func isProblemExists(name string) bool {
+	var dummy string
+	err := db.QueryRow("SELECT name FROM problems WHERE name = ?", name).Scan(&dummy)
+	return err == nil
+}
+
+// 取得する問題データを格納する構造体
+type ProblemData struct {
+	Name      string
+	Title     string
+	AuthorID  string
+	CreatedAt time.Time
+}
+
+// 登録されている全問題を取得する
+func getProblemList() ([]ProblemData, error) {
+	// 新しいものから順に取得
+	rows, err := db.Query("SELECT name, title, author_id, created_at FROM problems ORDER BY created_at DESC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var problems []ProblemData
+	for rows.Next() {
+		var p ProblemData
+		if err := rows.Scan(&p.Name, &p.Title, &p.AuthorID, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		problems = append(problems, p)
+	}
+	return problems, nil
 }
