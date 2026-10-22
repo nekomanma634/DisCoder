@@ -105,13 +105,15 @@ func handleRegister(s *discordgo.Session, i *discordgo.InteractionCreate, user *
 		return
 	}
 
-	customUsername := data.Options[0].StringValue()
+	// Discordのユーザー名をそのまま利用する
+	username := user.Username
+
 	role := "user"
 	if user.ID == os.Getenv("OWNER_ID") {
 		role = "admin"
 	}
 
-	if err := registerUserToDB(user.ID, customUsername, role); err != nil {
+	if err := registerUserToDB(user.ID, username, role); err != nil {
 		log.Println("ユーザー登録エラー:", err)
 		respondEphemeral(s, i, "登録中にエラーが発生しました。")
 		return
@@ -119,7 +121,7 @@ func handleRegister(s *discordgo.Session, i *discordgo.InteractionCreate, user *
 
 	go syncDiscordRole(s, i.GuildID, user.ID, role)
 
-	msg := fmt.Sprintf("✅ 登録が完了しました！\nシステム内のユーザー名: `%s`\n付与されたロール: `%s`", customUsername, role)
+	msg := fmt.Sprintf("✅ 登録が完了しました！\nシステム内のユーザー名: `%s`\n付与されたロール: `%s`", username, role)
 	respondEphemeral(s, i, msg)
 }
 

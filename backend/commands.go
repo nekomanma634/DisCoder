@@ -26,15 +26,7 @@ func registerCommands(dg *discordgo.Session) {
 		},
 		{
 			Name:        "register",
-			Description: "Discoderシステムにユーザー登録します",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionString,
-					Name:        "username",
-					Description: "コンテストで使用するユーザー名（半角英数字など）",
-					Required:    true,
-				},
-			},
+			Description: "Discoderシステムにユーザー登録します", // オプション入力を削除
 		},
 		{
 			Name:        "profile",
