@@ -55,6 +55,52 @@ func registerCommands(dg *discordgo.Session) {
 				},
 			},
 		},
+		{
+			Name:        "create_problem",
+			Description: "【Admin/Staff専用】新しい問題を作成・登録します",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "name",
+					Description: "問題ID (半角英数字のみ。例: abc001_a)",
+					Required:    true,
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "title",
+					Description: "問題の表示名 (例: はじめての足し算)",
+					Required:    true,
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionAttachment,
+					Name:        "statement",
+					Description: "問題文ファイル (.md)",
+					Required:    true,
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionAttachment,
+					Name:        "testcases",
+					Description: "テストケース (.zip形式。中に in/ と out/ フォルダを含める)",
+					Required:    true,
+				},
+			},
+		},
+		{
+			Name:        "problems",
+			Description: "【Admin/Staff専用】登録されている問題の一覧を確認します",
+		},
+		{
+			Name:        "show_problem",
+			Description: "【Admin/Staff専用】登録されている問題の本文(.md)を表示します",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "name",
+					Description: "表示する問題ID (例: abc001_a)",
+					Required:    true,
+				},
+			},
+		},
 	}
 
 	for _, cmd := range commands {
@@ -93,5 +139,11 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		handleProfile(s, i, user)
 	case "setrole":
 		handleSetRole(s, i, user, data)
+	case "create_problem":
+		handleCreateProblem(s, i, user, data)
+	case "problems":
+		handleProblems(s, i, user)
+	case "show_problem":
+		handleShowProblem(s, i, user, data)
 	}
 }
