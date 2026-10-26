@@ -74,12 +74,10 @@ func ensureSandbox() {
 	containerName := "discoder-sandbox"
 	log.Println("サンドボックスコンテナの状態を確認しています...")
 
-	// 1. コンテナの存在チェック
 	cmd := exec.Command("docker", "ps", "-a", "--format", "{{.Names}}", "-f", "name="+containerName)
 	out, _ := cmd.Output()
 
 	if !strings.Contains(string(out), containerName) {
-		// --- 追加: 新規作成前の確認 ---
 		if !askForConfirmation("サンドボックスコンテナが見つかりません。新規作成してよろしいですか？") {
 			log.Fatal("セットアップを中止しました。ジャッジシステムを起動できません。")
 		}
@@ -90,26 +88,39 @@ func ensureSandbox() {
 
 		runCmd := exec.Command("docker", "run", "-d", "--name", containerName, "-v", volumePath, "ubuntu:latest", "sleep", "infinity")
 		if err := runCmd.Run(); err != nil {
-			log.Fatalf("コンテナの作成に失敗しました: %v\n(Dockerが起動しているか確認してください)", err)
+			log.Fatalf("コンテナの作成に失敗しました: %v", err)
 		}
 	} else {
-		// 存在する場合は起動
 		exec.Command("docker", "start", containerName).Run()
 	}
 
-	// 2. コンパイラ環境のチェックと自動インストール
-	checkCmd := exec.Command("docker", "exec", containerName, "which", "g++")
-	if err := checkCmd.Run(); err != nil {
-		// --- 追加: インストール前の確認 ---
-		if !askForConfirmation("コンテナ内にコンパイラが見つかりません。自動インストール(g++, python3, golang)を開始してよろしいですか？ (1〜2分かかります)") {
-			log.Fatal("セットアップを中止しました。コンパイラが存在しないためジャッジは失敗します。")
+	// 必要なパッケージの取得
+	pkgs, cmds := getRequiredPackages()
+	if len(pkgs) == 0 {
+		log.Println("※ .env の ALLOWED_FILENAMES に対応するコンパイラが設定されていません。")
+		return
+	}
+
+	// 全ての必須コマンドがコンテナ内に存在するかチェック
+	needsInstall := false
+	for _, cmdName := range cmds {
+		if err := exec.Command("docker", "exec", containerName, "which", cmdName).Run(); err != nil {
+			needsInstall = true
+			break
+		}
+	}
+
+	if needsInstall {
+		prompt := fmt.Sprintf("必要なコンパイラが不足しています。自動インストール(%s)を開始してよろしいですか？ (1〜2分かかります)", strings.Join(pkgs, ", "))
+		if !askForConfirmation(prompt) {
+			log.Fatal("セットアップを中止しました。")
 		}
 
-		log.Println("自動インストールを開始します...")
-
+		log.Printf("自動インストールを開始します: %v\n", pkgs)
 		exec.Command("docker", "exec", containerName, "apt-get", "update").Run()
 
-		installCmd := exec.Command("docker", "exec", containerName, "apt-get", "install", "-y", "g++", "python3", "golang")
+		installArgs := append([]string{"exec", containerName, "apt-get", "install", "-y"}, pkgs...)
+		installCmd := exec.Command("docker", installArgs...)
 		installCmd.Stdout = os.Stdout
 		installCmd.Stderr = os.Stderr
 		if err := installCmd.Run(); err != nil {
@@ -165,21 +176,15 @@ func runJudgeLogic(sub Submission) string {
 		return "IE (Internal Error: .inファイルが見つかりません)"
 	}
 
-	var compileCmd, runCmd string
 	sandboxContainer := "discoder-sandbox"
-
-	switch ext {
-	case ".cpp":
-		compileCmd = fmt.Sprintf("g++ -O3 /host/%s -o /tmp/a.out", filepath.ToSlash(sub.FilePath))
-		runCmd = "/tmp/a.out"
-	case ".py":
-		runCmd = fmt.Sprintf("python3 /host/%s", filepath.ToSlash(sub.FilePath))
-	case ".go":
-		compileCmd = fmt.Sprintf("go build -o /tmp/prog /host/%s", filepath.ToSlash(sub.FilePath))
-		runCmd = "/tmp/prog"
-	default:
-		return "CE (コンパイルエラー: サポートされていない言語)"
+	langConfig, ok := SupportedLanguages[ext]
+	if !ok {
+		return "CE (未対応の言語)"
 	}
+
+	// JSONの設定内にある {filepath} を実際のパスに置換してコマンドを生成
+	compileCmd := strings.ReplaceAll(langConfig.CompileCmd, "{filepath}", filepath.ToSlash(sub.FilePath))
+	runCmd := strings.ReplaceAll(langConfig.RunCmd, "{filepath}", filepath.ToSlash(sub.FilePath))
 
 	// 3. コンパイルの実行
 	if compileCmd != "" {
@@ -249,4 +254,16 @@ func runJudgeLogic(sub Submission) string {
 		return "AC (正解)"
 	}
 	return "WA (不正解)"
+}
+
+func getRequiredPackages() (pkgs []string, cmds []string) {
+	pkgSet := make(map[string]bool)
+	for _, config := range SupportedLanguages {
+		if !pkgSet[config.Package] {
+			pkgSet[config.Package] = true
+			pkgs = append(pkgs, config.Package)
+			cmds = append(cmds, config.CheckCmd)
+		}
+	}
+	return pkgs, cmds
 }

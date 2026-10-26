@@ -55,9 +55,12 @@ func handleSubmit(s *discordgo.Session, i *discordgo.InteractionCreate, user *di
 
 	// 拡張子チェック (例: main.cpp -> .cpp)
 	ext := filepath.Ext(attachment.Filename)
-	allowedExts := os.Getenv("ALLOWED_FILENAMES") // .envには ".cpp,.py,.go" のように記述するように変更
-	if allowedExts != "" && !strings.Contains(allowedExts, ext) {
-		errMsg := fmt.Sprintf("エラー: 許可されていないファイル形式です。許可されている拡張子: `%s`", allowedExts)
+	if _, ok := SupportedLanguages[ext]; !ok {
+		var exts []string
+		for k := range SupportedLanguages {
+			exts = append(exts, k)
+		}
+		errMsg := fmt.Sprintf("エラー: 許可されていないファイル形式です。対応言語: `%s`", strings.Join(exts, ", "))
 		s.ChannelMessageSend(dmChannelID, errMsg)
 		return
 	}
@@ -456,20 +459,16 @@ func handleSandbox(s *discordgo.Session, i *discordgo.InteractionCreate, user *d
 
 	switch action {
 	case "status":
-		// 1. 基本ステータス（コンテナIDやイメージも追加）
 		cmd := exec.Command("docker", "ps", "-a", "--filter", "name="+containerName, "--format", "コンテナID: {{.ID}}\nイメージ: {{.Image}}\n状態: {{.Status}}\n起動時間: {{.RunningFor}}")
 		out, _ := cmd.CombinedOutput()
 		if string(out) == "" {
 			editEphemeral(s, i, "ℹ️ コンテナ `discoder-sandbox` は現在存在しません。（未作成または削除済み）")
-			return // ここで処理を終了する
+			return
 		}
 
 		statusText := strings.TrimSpace(string(out))
 
-		// 2. コンテナが起動中 (Up) の場合のみ、さらに詳細な情報を取得
 		if strings.Contains(statusText, "状態: Up") {
-			// リアルタイムのリソース使用量 (CPU / メモリ)
-			// ※ --no-stream オプションで現在のスナップショットを1回だけ取得します
 			statsCmd := exec.Command("docker", "stats", "--no-stream", "--format", "CPU使用率: {{.CPUPerc}}\nメモリ使用量: {{.MemUsage}}", containerName)
 			statsOut, _ := statsCmd.CombinedOutput()
 			if string(statsOut) != "" {
@@ -478,28 +477,16 @@ func handleSandbox(s *discordgo.Session, i *discordgo.InteractionCreate, user *d
 
 			statusText += "\n\n[インストール済み環境]"
 
-			// g++ バージョン (出力が長いため1行目だけを取得)
-			gppCmd := exec.Command("docker", "exec", containerName, "sh", "-c", "g++ --version | head -n 1")
-			if gppOut, err := gppCmd.CombinedOutput(); err == nil && string(gppOut) != "" {
-				statusText += "\n・" + strings.TrimSpace(string(gppOut))
-			} else {
-				statusText += "\n・g++: 未インストール"
-			}
-
-			// Python3 バージョン
-			pyCmd := exec.Command("docker", "exec", containerName, "python3", "--version")
-			if pyOut, err := pyCmd.CombinedOutput(); err == nil && string(pyOut) != "" {
-				statusText += "\n・" + strings.TrimSpace(string(pyOut))
-			} else {
-				statusText += "\n・Python3: 未インストール"
-			}
-
-			// Go バージョン
-			goCmd := exec.Command("docker", "exec", containerName, "go", "version")
-			if goOut, err := goCmd.CombinedOutput(); err == nil && string(goOut) != "" {
-				statusText += "\n・" + strings.TrimSpace(string(goOut))
-			} else {
-				statusText += "\n・Go: 未インストール"
+			// languages.json の設定を基に動的にバージョンを取得
+			for ext, config := range SupportedLanguages {
+				if config.VersionCmd == "" {
+					continue
+				}
+				vcCmd := exec.Command("docker", "exec", containerName, "sh", "-c", config.VersionCmd)
+				if vcOut, err := vcCmd.CombinedOutput(); err == nil && string(vcOut) != "" {
+					// どの拡張子の環境かわかるように表示（例: ・[.cpp] g++ 11.4.0）
+					statusText += fmt.Sprintf("\n・[%s] %s", ext, strings.TrimSpace(string(vcOut)))
+				}
 			}
 		}
 
@@ -521,18 +508,26 @@ func handleSandbox(s *discordgo.Session, i *discordgo.InteractionCreate, user *d
 			exec.Command("docker", "start", containerName).Run()
 			editEphemeral(s, i, "✅ 既存のサンドボックスコンテナを起動しました。")
 		} else {
-			// 新規作成とインストールは時間がかかるため非同期で実行
-			editEphemeral(s, i, "⏳ 新規コンテナを作成し、コンパイラ(g++, python3, go)をインストールしています...\n※完了まで1〜2分かかります。このままお待ちください。")
+			pkgs, _ := getRequiredPackages()
+			pkgListStr := strings.Join(pkgs, ", ")
+
+			editEphemeral(s, i, "⏳ 新規コンテナを作成しています...")
 
 			go func() {
 				cwd, _ := os.Getwd()
 				volumePath := filepath.ToSlash(cwd) + ":/host"
 
-				// コンテナ作成
+				// 1. コンテナ作成
 				exec.Command("docker", "run", "-d", "--name", containerName, "-v", volumePath, "ubuntu:latest", "sleep", "infinity").Run()
-				// パッケージ更新とインストール
+
+				// 2. パッケージ更新
+				editEphemeral(s, i, fmt.Sprintf("⏳ コンテナを作成しました。パッケージリストを更新中...\nインストール予定: `%s`", pkgListStr))
 				exec.Command("docker", "exec", containerName, "apt-get", "update").Run()
-				exec.Command("docker", "exec", containerName, "apt-get", "install", "-y", "g++", "python3", "golang").Run()
+
+				// 3. コンパイラのインストール
+				editEphemeral(s, i, fmt.Sprintf("⏳ コンパイラをインストールしています...\n対象: `%s`\n※1〜2分かかります。このままお待ちください。", pkgListStr))
+				installArgs := append([]string{"exec", containerName, "apt-get", "install", "-y"}, pkgs...)
+				exec.Command("docker", installArgs...).Run()
 
 				editEphemeral(s, i, "🎉 サンドボックスの新規構築とセットアップが完了しました！ジャッジ可能な状態です。")
 			}()
