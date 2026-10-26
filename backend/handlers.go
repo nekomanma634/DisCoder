@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
-	"regexp"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -84,7 +85,7 @@ func handleSubmit(s *discordgo.Session, i *discordgo.InteractionCreate, user *di
 	}
 
 	s.ChannelMessageSend(dmChannelID, fmt.Sprintf("✅ 提出を受け付けました！\n問題: `%s`\nファイル: `%s`\n現在ジャッジ中です...", problemID, attachment.Filename))
-	
+
 	// ジャッジキューに送信
 	JudgeQueue <- submissionData
 }
@@ -293,7 +294,7 @@ func handleCreateProblem(s *discordgo.Session, i *discordgo.InteractionCreate, u
 
 	inDir := filepath.Join(baseDir, "in")
 	outDir := filepath.Join(baseDir, "out")
-	
+
 	// 直下に in フォルダが無い場合、1つ下の階層を探索する
 	if _, err := os.Stat(inDir); os.IsNotExist(err) {
 		entries, _ := os.ReadDir(baseDir)
@@ -301,7 +302,7 @@ func handleCreateProblem(s *discordgo.Session, i *discordgo.InteractionCreate, u
 			if e.IsDir() && e.Name() != "in" && e.Name() != "out" {
 				nestedIn := filepath.Join(baseDir, e.Name(), "in")
 				nestedOut := filepath.Join(baseDir, e.Name(), "out")
-				
+
 				// 余分なフォルダの中に in があれば、直下に引き上げる
 				if _, errIn := os.Stat(nestedIn); errIn == nil {
 					os.Rename(nestedIn, inDir)
@@ -322,7 +323,7 @@ func handleCreateProblem(s *discordgo.Session, i *discordgo.InteractionCreate, u
 	}
 
 	log.Printf("[PROBLEM CREATED] %s (ID: %s) が作成されました。\n", problemTitle, problemName)
-	successMsg := fmt.Sprintf("✅ **問題の登録が完了しました！**\n\n**問題ID**: `%s`\n**表示名**: %s\n\nディレクトリ (`problems/%s/`) に展開されました。", 
+	successMsg := fmt.Sprintf("✅ **問題の登録が完了しました！**\n\n**問題ID**: `%s`\n**表示名**: %s\n\nディレクトリ (`problems/%s/`) に展開されました。",
 		problemName, problemTitle, problemName)
 	editEphemeral(s, i, successMsg)
 }
@@ -364,7 +365,7 @@ func handleProblems(s *discordgo.Session, i *discordgo.InteractionCreate, user *
 	for _, p := range problems {
 		// 日付を見やすくフォーマット (例: 2026/10/22)
 		dateStr := p.CreatedAt.Format("2006/01/02")
-		
+
 		field := &discordgo.MessageEmbedField{
 			Name:   fmt.Sprintf("ID: `%s`", p.Name),
 			Value:  fmt.Sprintf("**%s**\n登録日: %s", p.Title, dateStr),
@@ -437,4 +438,104 @@ func handleShowProblem(s *discordgo.Session, i *discordgo.InteractionCreate, use
 			Flags:  discordgo.MessageFlagsEphemeral,
 		},
 	})
+}
+
+func handleSandbox(s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, data discordgo.ApplicationCommandInteractionData) {
+	// 即座に応答してタイムアウトを防ぐ
+	respondEphemeral(s, i, "⏳ サンドボックスの操作を実行中です...")
+
+	// 権限チェック
+	role, isReg, err := getUserRole(user.ID)
+	if err != nil || !isReg || role != "admin" {
+		editEphemeral(s, i, "⛔ 権限がありません。このコマンドは Admin 専用です。")
+		return
+	}
+
+	action := data.Options[0].StringValue()
+	containerName := "discoder-sandbox"
+
+	switch action {
+	case "status":
+		// 1. 基本ステータス（コンテナIDやイメージも追加）
+		cmd := exec.Command("docker", "ps", "-a", "--filter", "name="+containerName, "--format", "コンテナID: {{.ID}}\nイメージ: {{.Image}}\n状態: {{.Status}}\n起動時間: {{.RunningFor}}")
+		out, _ := cmd.CombinedOutput()
+		if string(out) == "" {
+			editEphemeral(s, i, "ℹ️ コンテナ `discoder-sandbox` は現在存在しません。（未作成または削除済み）")
+			return // ここで処理を終了する
+		}
+
+		statusText := strings.TrimSpace(string(out))
+
+		// 2. コンテナが起動中 (Up) の場合のみ、さらに詳細な情報を取得
+		if strings.Contains(statusText, "状態: Up") {
+			// リアルタイムのリソース使用量 (CPU / メモリ)
+			// ※ --no-stream オプションで現在のスナップショットを1回だけ取得します
+			statsCmd := exec.Command("docker", "stats", "--no-stream", "--format", "CPU使用率: {{.CPUPerc}}\nメモリ使用量: {{.MemUsage}}", containerName)
+			statsOut, _ := statsCmd.CombinedOutput()
+			if string(statsOut) != "" {
+				statusText += "\n" + strings.TrimSpace(string(statsOut))
+			}
+
+			statusText += "\n\n[インストール済み環境]"
+
+			// g++ バージョン (出力が長いため1行目だけを取得)
+			gppCmd := exec.Command("docker", "exec", containerName, "sh", "-c", "g++ --version | head -n 1")
+			if gppOut, err := gppCmd.CombinedOutput(); err == nil && string(gppOut) != "" {
+				statusText += "\n・" + strings.TrimSpace(string(gppOut))
+			} else {
+				statusText += "\n・g++: 未インストール"
+			}
+
+			// Python3 バージョン
+			pyCmd := exec.Command("docker", "exec", containerName, "python3", "--version")
+			if pyOut, err := pyCmd.CombinedOutput(); err == nil && string(pyOut) != "" {
+				statusText += "\n・" + strings.TrimSpace(string(pyOut))
+			} else {
+				statusText += "\n・Python3: 未インストール"
+			}
+
+			// Go バージョン
+			goCmd := exec.Command("docker", "exec", containerName, "go", "version")
+			if goOut, err := goCmd.CombinedOutput(); err == nil && string(goOut) != "" {
+				statusText += "\n・" + strings.TrimSpace(string(goOut))
+			} else {
+				statusText += "\n・Go: 未インストール"
+			}
+		}
+
+		editEphemeral(s, i, fmt.Sprintf("📊 **サンドボックス詳細ステータス**\n```text\n%s\n```", statusText))
+
+	case "stop":
+		exec.Command("docker", "stop", containerName).Run()
+		editEphemeral(s, i, "✅ サンドボックスコンテナを一時停止しました。")
+
+	case "delete":
+		exec.Command("docker", "rm", "-f", containerName).Run()
+		editEphemeral(s, i, "🗑️ サンドボックスコンテナを完全に削除しました。\n※次回 `start` 実行時、またはシステム再起動時に初期状態から再構築されます。")
+
+	case "start":
+		cmd := exec.Command("docker", "ps", "-a", "--format", "{{.Names}}", "-f", "name="+containerName)
+		out, _ := cmd.Output()
+
+		if strings.Contains(string(out), containerName) {
+			exec.Command("docker", "start", containerName).Run()
+			editEphemeral(s, i, "✅ 既存のサンドボックスコンテナを起動しました。")
+		} else {
+			// 新規作成とインストールは時間がかかるため非同期で実行
+			editEphemeral(s, i, "⏳ 新規コンテナを作成し、コンパイラ(g++, python3, go)をインストールしています...\n※完了まで1〜2分かかります。このままお待ちください。")
+
+			go func() {
+				cwd, _ := os.Getwd()
+				volumePath := filepath.ToSlash(cwd) + ":/host"
+
+				// コンテナ作成
+				exec.Command("docker", "run", "-d", "--name", containerName, "-v", volumePath, "ubuntu:latest", "sleep", "infinity").Run()
+				// パッケージ更新とインストール
+				exec.Command("docker", "exec", containerName, "apt-get", "update").Run()
+				exec.Command("docker", "exec", containerName, "apt-get", "install", "-y", "g++", "python3", "golang").Run()
+
+				editEphemeral(s, i, "🎉 サンドボックスの新規構築とセットアップが完了しました！ジャッジ可能な状態です。")
+			}()
+		}
+	}
 }

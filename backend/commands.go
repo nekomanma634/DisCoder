@@ -125,6 +125,24 @@ func registerCommands(dg *discordgo.Session) {
 				},
 			},
 		},
+		{
+			Name:        "sandbox",
+			Description: "【Admin専用】ジャッジ用サンドボックスコンテナの管理を行います",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "action",
+					Description: "実行する操作",
+					Required:    true,
+					Choices: []*discordgo.ApplicationCommandOptionChoice{
+						{Name: "状態確認 (status)", Value: "status"},
+						{Name: "起動・構築 (start)", Value: "start"},
+						{Name: "停止 (stop)", Value: "stop"},
+						{Name: "完全削除 (delete)", Value: "delete"},
+					},
+				},
+			},
+		},
 	}
 
 	for _, cmd := range commands {
@@ -171,5 +189,7 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		handleProblems(s, i, user)
 	case "show_problem":
 		handleShowProblem(s, i, user, data)
+	case "sandbox":
+		handleSandbox(s, i, user, data)
 	}
 }

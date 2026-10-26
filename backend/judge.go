@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"log"
@@ -29,12 +30,11 @@ var JudgeQueue chan Submission
 
 // ジャッジシステムの初期化
 func initJudgeQueues(dg *discordgo.Session) {
-	// コンテナの自動構築・起動
+	// コンテナの自動構築・起動 (確認プロンプト付き)
 	ensureSandbox()
 
 	JudgeQueue = make(chan Submission, 1000)
-	
-	// .envからWORKER_COUNTを読み込む（デフォルトは2）
+
 	workerCount := 2
 	if countStr := os.Getenv("WORKER_COUNT"); countStr != "" {
 		if count, err := strconv.Atoi(countStr); err == nil && count > 0 {
@@ -50,6 +50,25 @@ func initJudgeQueues(dg *discordgo.Session) {
 	log.Printf("ジャッジシステムをワーカー数 %d で起動しました。\n", workerCount)
 }
 
+// ユーザーに Y/n で確認を求めるヘルパー関数
+func askForConfirmation(prompt string) bool {
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Printf("%s [Y/n]: ", prompt)
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			log.Fatal(err)
+		}
+		response = strings.ToLower(strings.TrimSpace(response))
+
+		if response == "y" || response == "yes" || response == "" {
+			return true
+		} else if response == "n" || response == "no" {
+			return false
+		}
+	}
+}
+
 // サンドボックスコンテナの自動セットアップ
 func ensureSandbox() {
 	containerName := "discoder-sandbox"
@@ -58,28 +77,38 @@ func ensureSandbox() {
 	// 1. コンテナの存在チェック
 	cmd := exec.Command("docker", "ps", "-a", "--format", "{{.Names}}", "-f", "name="+containerName)
 	out, _ := cmd.Output()
-	
+
 	if !strings.Contains(string(out), containerName) {
+		// --- 追加: 新規作成前の確認 ---
+		if !askForConfirmation("サンドボックスコンテナが見つかりません。新規作成してよろしいですか？") {
+			log.Fatal("セットアップを中止しました。ジャッジシステムを起動できません。")
+		}
+
 		log.Println("サンドボックスコンテナを新規作成しています...")
 		cwd, _ := os.Getwd()
 		volumePath := filepath.ToSlash(cwd) + ":/host"
-		
+
 		runCmd := exec.Command("docker", "run", "-d", "--name", containerName, "-v", volumePath, "ubuntu:latest", "sleep", "infinity")
 		if err := runCmd.Run(); err != nil {
-			log.Fatalf("コンテナの作成に失敗しました: %v\n(Dockerが起動しているか、権限があるか確認してください)", err)
+			log.Fatalf("コンテナの作成に失敗しました: %v\n(Dockerが起動しているか確認してください)", err)
 		}
 	} else {
-		// 存在する場合は起動（すでに起動済みの場合は何もしない）
+		// 存在する場合は起動
 		exec.Command("docker", "start", containerName).Run()
 	}
 
 	// 2. コンパイラ環境のチェックと自動インストール
 	checkCmd := exec.Command("docker", "exec", containerName, "which", "g++")
 	if err := checkCmd.Run(); err != nil {
-		log.Println("コンテナ内にコンパイラが見つかりません。自動インストールを開始します (1〜2分かかります)...")
-		
+		// --- 追加: インストール前の確認 ---
+		if !askForConfirmation("コンテナ内にコンパイラが見つかりません。自動インストール(g++, python3, golang)を開始してよろしいですか？ (1〜2分かかります)") {
+			log.Fatal("セットアップを中止しました。コンパイラが存在しないためジャッジは失敗します。")
+		}
+
+		log.Println("自動インストールを開始します...")
+
 		exec.Command("docker", "exec", containerName, "apt-get", "update").Run()
-		
+
 		installCmd := exec.Command("docker", "exec", containerName, "apt-get", "install", "-y", "g++", "python3", "golang")
 		installCmd.Stdout = os.Stdout
 		installCmd.Stderr = os.Stderr
@@ -130,7 +159,7 @@ func runJudgeLogic(sub Submission) string {
 			break
 		}
 	}
-	
+
 	if !hasInFile {
 		log.Printf("[ERROR] %s の中に .in 拡張子のファイルが1つもありません。\n", inDir)
 		return "IE (Internal Error: .inファイルが見つかりません)"
@@ -156,7 +185,7 @@ func runJudgeLogic(sub Submission) string {
 	if compileCmd != "" {
 		cmd := exec.Command("docker", "exec", sandboxContainer, "sh", "-c", compileCmd)
 		out, err := cmd.CombinedOutput()
-		
+
 		if err != nil {
 			errMsg := strings.TrimSpace(string(out))
 			if errMsg == "" {
@@ -175,7 +204,7 @@ func runJudgeLogic(sub Submission) string {
 		if !strings.HasSuffix(file.Name(), ".in") {
 			continue
 		}
-		
+
 		baseName := strings.TrimSuffix(file.Name(), ".in")
 		inPath := filepath.Join(inDir, file.Name())
 		outPath := filepath.Join(outDir, baseName+".out")
@@ -189,7 +218,7 @@ func runJudgeLogic(sub Submission) string {
 		inFile, _ := os.Open(inPath)
 		cmd := exec.Command("docker", "exec", "-i", sandboxContainer, "sh", "-c", runCmd)
 		cmd.Stdin = inFile
-		
+
 		var outBuf bytes.Buffer
 		cmd.Stdout = &outBuf
 
