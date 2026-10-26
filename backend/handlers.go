@@ -34,65 +34,109 @@ func handleSubmit(s *discordgo.Session, i *discordgo.InteractionCreate, user *di
 		},
 	})
 
+	var problemID string
 	var attachment *discordgo.MessageAttachment
-	for _, att := range data.Resolved.Attachments {
-		attachment = att
-		break
+
+	for _, opt := range data.Options {
+		switch opt.Name {
+		case "problem":
+			problemID = opt.StringValue()
+		case "file":
+			attachment = data.Resolved.Attachments[opt.Value.(string)]
+		}
 	}
 
-	if attachment == nil {
-		s.ChannelMessageSend(dmChannelID, "エラー: ファイルが添付されていません。")
+	// 問題が存在するかチェック
+	if !isProblemExists(problemID) {
+		s.ChannelMessageSend(dmChannelID, fmt.Sprintf("エラー: 問題ID `%s` は存在しません。", problemID))
 		return
 	}
 
-	allowedFiles := os.Getenv("ALLOWED_FILENAMES")
-	if allowedFiles != "" {
-		isValidFile := false
-		for _, allowed := range strings.Split(allowedFiles, ",") {
-			if attachment.Filename == strings.TrimSpace(allowed) {
-				isValidFile = true
-				break
-			}
-		}
-		if !isValidFile {
-			errMsg := fmt.Sprintf("エラー: 提出できるファイル名は `%s` のみです。\nあなたの提出ファイル: `%s`", allowedFiles, attachment.Filename)
-			s.ChannelMessageSend(dmChannelID, errMsg)
-			return
-		}
+	// 拡張子チェック (例: main.cpp -> .cpp)
+	ext := filepath.Ext(attachment.Filename)
+	allowedExts := os.Getenv("ALLOWED_FILENAMES") // .envには ".cpp,.py,.go" のように記述するように変更
+	if allowedExts != "" && !strings.Contains(allowedExts, ext) {
+		errMsg := fmt.Sprintf("エラー: 許可されていないファイル形式です。許可されている拡張子: `%s`", allowedExts)
+		s.ChannelMessageSend(dmChannelID, errMsg)
+		return
 	}
 
 	userDirName := fmt.Sprintf("%s_%s", user.Username, user.ID)
-	submitDir := filepath.Join("submissions", userDirName)
-	if err := os.MkdirAll(submitDir, os.ModePerm); err != nil {
-		s.ChannelMessageSend(dmChannelID, "サーバーエラー: 保存先ディレクトリを作成できませんでした。")
-		return
-	}
+	submitDir := filepath.Join("submissions", userDirName, problemID)
+	os.MkdirAll(submitDir, os.ModePerm)
 
 	filePath := filepath.Join(submitDir, attachment.Filename)
 	if err := downloadAttachment(attachment.URL, filePath); err != nil {
 		s.ChannelMessageSend(dmChannelID, "エラー: ファイルの保存に失敗しました。")
-		log.Println("ダウンロードエラー:", err)
 		return
 	}
 
 	now := time.Now()
-	log.Printf("[SUBMIT] User: %s (ID: %s), File: %s, Path: %s\n", user.Username, user.ID, attachment.Filename, filePath)
-
 	submissionData := Submission{
 		UserID:      user.ID,
 		Username:    user.Username,
+		ProblemID:   problemID,
 		Filename:    attachment.Filename,
 		FilePath:    filePath,
 		DMChannelID: dmChannelID,
 		SubmittedAt: now,
+		IsTest:      false,
 	}
 
-	msg := fmt.Sprintf("提出を受け付けました！\nファイル名: `%s`\n現在ジャッジの順番待ちキューに入っています...", attachment.Filename)
-	s.ChannelMessageSend(dmChannelID, msg)
+	s.ChannelMessageSend(dmChannelID, fmt.Sprintf("✅ 提出を受け付けました！\n問題: `%s`\nファイル: `%s`\n現在ジャッジ中です...", problemID, attachment.Filename))
+	
+	// ジャッジキューに送信
+	JudgeQueue <- submissionData
+}
 
-	if q, exists := problemQueues[attachment.Filename]; exists {
-		q <- submissionData
+func handleTestProblem(s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, dmChannelID string, data discordgo.ApplicationCommandInteractionData) {
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: "テスト処理を開始しました。結果はDMに送信されます。",
+			Flags:   discordgo.MessageFlagsEphemeral,
+		},
+	})
+
+	role, isReg, err := getUserRole(user.ID)
+	if err != nil || !isReg || role != "admin" {
+		s.ChannelMessageSend(dmChannelID, "⛔ 権限がありません。このコマンドは Admin 専用です。")
+		return
 	}
+
+	var problemID string
+	var attachment *discordgo.MessageAttachment
+	for _, opt := range data.Options {
+		if opt.Name == "problem" {
+			problemID = opt.StringValue()
+		} else if opt.Name == "file" {
+			attachment = data.Resolved.Attachments[opt.Value.(string)]
+		}
+	}
+
+	if !isProblemExists(problemID) {
+		s.ChannelMessageSend(dmChannelID, "エラー: 問題が存在しません。")
+		return
+	}
+
+	testDir := filepath.Join("submissions", "admin_test", problemID)
+	os.MkdirAll(testDir, os.ModePerm)
+	filePath := filepath.Join(testDir, attachment.Filename)
+	downloadAttachment(attachment.URL, filePath)
+
+	submissionData := Submission{
+		UserID:      user.ID,
+		Username:    user.Username,
+		ProblemID:   problemID,
+		Filename:    attachment.Filename,
+		FilePath:    filePath,
+		DMChannelID: dmChannelID,
+		SubmittedAt: time.Now(),
+		IsTest:      true, // テストモードフラグ
+	}
+
+	s.ChannelMessageSend(dmChannelID, fmt.Sprintf("🔧 **[ADMIN TEST]**\n問題: `%s` に対してテストを実行中...", problemID))
+	JudgeQueue <- submissionData
 }
 
 func handleRegister(s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, data discordgo.ApplicationCommandInteractionData) {
@@ -246,6 +290,30 @@ func handleCreateProblem(s *discordgo.Session, i *discordgo.InteractionCreate, u
 
 	// 展開が終わった元のZIPファイルは不要なので削除
 	os.Remove(zipPath)
+
+	inDir := filepath.Join(baseDir, "in")
+	outDir := filepath.Join(baseDir, "out")
+	
+	// 直下に in フォルダが無い場合、1つ下の階層を探索する
+	if _, err := os.Stat(inDir); os.IsNotExist(err) {
+		entries, _ := os.ReadDir(baseDir)
+		for _, e := range entries {
+			if e.IsDir() && e.Name() != "in" && e.Name() != "out" {
+				nestedIn := filepath.Join(baseDir, e.Name(), "in")
+				nestedOut := filepath.Join(baseDir, e.Name(), "out")
+				
+				// 余分なフォルダの中に in があれば、直下に引き上げる
+				if _, errIn := os.Stat(nestedIn); errIn == nil {
+					os.Rename(nestedIn, inDir)
+					os.Rename(nestedOut, outDir)
+					// 不要になった空の親フォルダを丸ごと削除
+					os.RemoveAll(filepath.Join(baseDir, e.Name()))
+					log.Printf("[AUTO FIX] %s のテストケース階層ズレ (%s) を自動補正しました。\n", problemName, e.Name())
+					break
+				}
+			}
+		}
+	}
 
 	if err := registerProblemToDB(problemName, problemTitle, user.ID); err != nil {
 		log.Println("DB登録エラー:", err)

@@ -13,9 +13,33 @@ func registerCommands(dg *discordgo.Session) {
 			Description: "ソースコードを提出します",
 			Options: []*discordgo.ApplicationCommandOption{
 				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "problem",
+					Description: "提出先の問題ID (例: abc001_a)",
+					Required:    true,
+				},
+				{
 					Type:        discordgo.ApplicationCommandOptionAttachment,
 					Name:        "file",
-					Description: "提出するファイル",
+					Description: "提出するソースコード",
+					Required:    true,
+				},
+			},
+		},
+		{
+			Name:        "test_problem",
+			Description: "【Admin専用】登録された問題のテストケースに対してコードを実行・検証します",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "problem",
+					Description: "テストする問題ID",
+					Required:    true,
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionAttachment,
+					Name:        "file",
+					Description: "正解と想定されるソースコード",
 					Required:    true,
 				},
 			},
@@ -133,6 +157,8 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		handleHello(s, i, user, dmChannel.ID)
 	case "submit":
 		handleSubmit(s, i, user, dmChannel.ID, data)
+	case "test_problem":
+		handleTestProblem(s, i, user, dmChannel.ID, data)
 	case "register":
 		handleRegister(s, i, user, data)
 	case "profile":
