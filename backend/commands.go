@@ -50,7 +50,7 @@ func registerCommands(dg *discordgo.Session) {
 		},
 		{
 			Name:        "register",
-			Description: "Discoderシステムにユーザー登録します", // オプション入力を削除
+			Description: "Discoderシステムにユーザー登録します",
 		},
 		{
 			Name:        "profile",
@@ -106,6 +106,13 @@ func registerCommands(dg *discordgo.Session) {
 					Name:        "testcases",
 					Description: "テストケース (.zip形式。中に in/ と out/ フォルダを含める)",
 					Required:    true,
+				},
+				// --- 今回追加した config オプション ---
+				{
+					Type:        discordgo.ApplicationCommandOptionAttachment,
+					Name:        "config",
+					Description: "問題の設定ファイル (.json形式 / 時間・メモリ制限)",
+					Required:    false, // 必須ではない（未指定時はデフォルト値を使用）
 				},
 			},
 		},

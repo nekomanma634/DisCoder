@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"encoding/json"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -182,11 +183,11 @@ func runJudgeLogic(sub Submission) string {
 		return "CE (未対応の言語)"
 	}
 
-	// JSONの設定内にある {filepath} を実際のパスに置換してコマンドを生成
+	// 1. JSONの設定内にある {filepath} を実際のパスに置換してコマンドを生成
 	compileCmd := strings.ReplaceAll(langConfig.CompileCmd, "{filepath}", filepath.ToSlash(sub.FilePath))
 	runCmd := strings.ReplaceAll(langConfig.RunCmd, "{filepath}", filepath.ToSlash(sub.FilePath))
 
-	// 3. コンパイルの実行
+	// 2. コンパイルの実行
 	if compileCmd != "" {
 		cmd := exec.Command("docker", "exec", sandboxContainer, "sh", "-c", compileCmd)
 		out, err := cmd.CombinedOutput()
@@ -202,6 +203,34 @@ func runJudgeLogic(sub Submission) string {
 			return fmt.Sprintf("CE (コンパイルエラー)\n```text\n%s\n```", errMsg)
 		}
 	}
+
+	// --- 3. 問題のコンフィグ (config.json) の読み込み ---
+	type ProblemConfig struct {
+		TimeLimit   float64 `json:"time_limit"`
+		MemoryLimit int     `json:"memory_limit"` // MB単位
+	}
+
+	configPath := filepath.Join(problemDir, "config.json")
+	configData, err := os.ReadFile(configPath)
+	var pConfig ProblemConfig
+	if err == nil {
+		json.Unmarshal(configData, &pConfig)
+	}
+
+	// 読み込めなかったり不正な値の場合はデフォルト値をセット
+	if pConfig.TimeLimit <= 0 {
+		pConfig.TimeLimit = 2.0 // デフォルト2秒
+	}
+	if pConfig.MemoryLimit <= 0 {
+		pConfig.MemoryLimit = 1024 // デフォルト1024MB
+	}
+
+	// 時間制限とメモリ制限をコマンドに適用
+	timeoutDuration := time.Duration(pConfig.TimeLimit * float64(time.Second))
+	memoryLimitKB := pConfig.MemoryLimit * 1024
+	
+	// ulimit -v でコンテナ内の仮想メモリを制限して実行する
+	runCmdWithLimit := fmt.Sprintf("ulimit -v %d; %s", memoryLimitKB, runCmd)
 
 	// 4. 全テストケースに対して実行・照合
 	allAC := true
@@ -221,7 +250,7 @@ func runJudgeLogic(sub Submission) string {
 		expectedOutput := strings.TrimSpace(string(expectedOutputBytes))
 
 		inFile, _ := os.Open(inPath)
-		cmd := exec.Command("docker", "exec", "-i", sandboxContainer, "sh", "-c", runCmd)
+		cmd := exec.Command("docker", "exec", "-i", sandboxContainer, "sh", "-c", runCmdWithLimit)
 		cmd.Stdin = inFile
 
 		var outBuf bytes.Buffer
@@ -232,14 +261,15 @@ func runJudgeLogic(sub Submission) string {
 		go func() { done <- cmd.Wait() }()
 
 		select {
-		case <-time.After(2 * time.Second):
+		case <-time.After(timeoutDuration): // TLE判定に config.json の値を使用
 			cmd.Process.Kill()
 			inFile.Close()
 			return "TLE (実行時間制限超過)"
 		case err := <-done:
 			inFile.Close()
 			if err != nil {
-				return "RE (実行時エラー)"
+				// ulimit に引っかかった場合（メモリ確保失敗）や、単純な配列外参照などは全て非ゼロ終了（RE）になる
+				return "RE (実行時エラー / メモリ制限超過の可能性)"
 			}
 		}
 

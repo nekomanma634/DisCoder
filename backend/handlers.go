@@ -234,7 +234,7 @@ func handleCreateProblem(s *discordgo.Session, i *discordgo.InteractionCreate, u
 	}
 
 	var problemName, problemTitle string
-	var mdAtt, zipAtt *discordgo.MessageAttachment
+	var mdAtt, zipAtt, configAtt *discordgo.MessageAttachment
 
 	for _, opt := range data.Options {
 		switch opt.Name {
@@ -246,6 +246,8 @@ func handleCreateProblem(s *discordgo.Session, i *discordgo.InteractionCreate, u
 			mdAtt = data.Resolved.Attachments[opt.Value.(string)]
 		case "testcases":
 			zipAtt = data.Resolved.Attachments[opt.Value.(string)]
+		case "config":
+			configAtt = data.Resolved.Attachments[opt.Value.(string)] // 追加: configファイル
 		}
 	}
 
@@ -286,19 +288,32 @@ func handleCreateProblem(s *discordgo.Session, i *discordgo.InteractionCreate, u
 		editEphemeral(s, i, "エラー: テストケース(ZIP)のダウンロードに失敗しました。")
 		return
 	}
-
 	if err := unzip(zipPath, baseDir); err != nil {
 		editEphemeral(s, i, fmt.Sprintf("エラー: ZIPの解凍に失敗しました: %v", err))
 		return
 	}
+	os.Remove(zipPath) // 元のZIPは削除
 
-	// 展開が終わった元のZIPファイルは不要なので削除
-	os.Remove(zipPath)
+	// --- 追加: config.json の保存処理 ---
+	configPath := filepath.Join(baseDir, "config.json")
+	if configAtt != nil && strings.HasSuffix(strings.ToLower(configAtt.Filename), ".json") {
+		if err := downloadAttachment(configAtt.URL, configPath); err != nil {
+			editEphemeral(s, i, "エラー: config.jsonのダウンロードに失敗しました。")
+			return
+		}
+	} else {
+		// 添付がない場合はデフォルト設定を作成 (2.0秒 / 1024MB)
+		defaultConfig := []byte(`{
+  "time_limit": 2.0,
+  "memory_limit": 1024
+}`)
+		os.WriteFile(configPath, defaultConfig, os.ModePerm)
+	}
 
+	// 階層ズレ補正ロジック
 	inDir := filepath.Join(baseDir, "in")
 	outDir := filepath.Join(baseDir, "out")
 
-	// 直下に in フォルダが無い場合、1つ下の階層を探索する
 	if _, err := os.Stat(inDir); os.IsNotExist(err) {
 		entries, _ := os.ReadDir(baseDir)
 		for _, e := range entries {
@@ -306,11 +321,9 @@ func handleCreateProblem(s *discordgo.Session, i *discordgo.InteractionCreate, u
 				nestedIn := filepath.Join(baseDir, e.Name(), "in")
 				nestedOut := filepath.Join(baseDir, e.Name(), "out")
 
-				// 余分なフォルダの中に in があれば、直下に引き上げる
 				if _, errIn := os.Stat(nestedIn); errIn == nil {
 					os.Rename(nestedIn, inDir)
 					os.Rename(nestedOut, outDir)
-					// 不要になった空の親フォルダを丸ごと削除
 					os.RemoveAll(filepath.Join(baseDir, e.Name()))
 					log.Printf("[AUTO FIX] %s のテストケース階層ズレ (%s) を自動補正しました。\n", problemName, e.Name())
 					break
