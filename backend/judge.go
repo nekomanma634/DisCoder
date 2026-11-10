@@ -166,21 +166,8 @@ func runJudgeLogic(sub Submission) (string, string) {
 
 	inFiles, err := os.ReadDir(inDir)
 	if err != nil {
-		log.Printf("[ERROR] テストケースが見つかりません。探したパス: %s, エラー詳細: %v\n", inDir, err)
-		return "IE (Internal Error: inディレクトリがありません)", ""
-	}
-
-	hasInFile := false
-	for _, f := range inFiles {
-		if strings.HasSuffix(f.Name(), ".in") {
-			hasInFile = true
-			break
-		}
-	}
-
-	if !hasInFile {
-		log.Printf("[ERROR] %s の中に .in 拡張子のファイルが1つもありません。\n", inDir)
-		return "IE (Internal Error: .inファイルが見つかりません)", ""
+		log.Printf("[ERROR] テストケースが見つかりません。パス: %s\n", inDir)
+		return "IE (Internal Error)", ""
 	}
 
 	sandboxContainer := "discoder-sandbox"
@@ -195,12 +182,8 @@ func runJudgeLogic(sub Submission) (string, string) {
 	if compileCmd != "" {
 		cmd := exec.Command("docker", "exec", sandboxContainer, "sh", "-c", compileCmd)
 		out, err := cmd.CombinedOutput()
-
 		if err != nil {
 			errMsg := strings.TrimSpace(string(out))
-			if errMsg == "" {
-				errMsg = "エラーメッセージがありません。コンテナ内で処理が失敗しました。"
-			}
 			if len(errMsg) > 1000 {
 				errMsg = string([]rune(errMsg)[:1000]) + "\n... (以降省略)"
 			}
@@ -219,105 +202,118 @@ func runJudgeLogic(sub Submission) (string, string) {
 	if err == nil {
 		json.Unmarshal(configData, &pConfig)
 	}
-
-	if pConfig.TimeLimit <= 0 {
-		pConfig.TimeLimit = 2.0
-	}
-	if pConfig.MemoryLimit <= 0 {
-		pConfig.MemoryLimit = 1024
-	}
+	if pConfig.TimeLimit <= 0 { pConfig.TimeLimit = 2.0 }
+	if pConfig.MemoryLimit <= 0 { pConfig.MemoryLimit = 1024 }
 
 	memoryLimitKB := pConfig.MemoryLimit * 1024
-	runCmdWithLimit := fmt.Sprintf("ulimit -v %d; timeout %f %s", memoryLimitKB, pConfig.TimeLimit, runCmd)
 	goTimeout := time.Duration((pConfig.TimeLimit + 1.0) * float64(time.Second))
 
-	// 詳細情報を保存する変数
 	var detailLines []string
 	var maxTimeMs int64 = 0
+	var maxMemoryKB int64 = 0
 	allAC := true
 
 	for _, file := range inFiles {
-		if !strings.HasSuffix(file.Name(), ".in") {
-			continue
-		}
-
+		if !strings.HasSuffix(file.Name(), ".in") { continue }
+		
 		baseName := strings.TrimSuffix(file.Name(), ".in")
 		inPath := filepath.Join(inDir, file.Name())
 		outPath := filepath.Join(outDir, baseName+".out")
 
-		expectedOutputBytes, err := os.ReadFile(outPath)
-		if err != nil {
-			return "IE (出力ファイル読込エラー)", ""
-		}
+		expectedOutputBytes, _ := os.ReadFile(outPath)
 		expectedOutput := strings.TrimSpace(string(expectedOutputBytes))
 
+		// --- 💡変更点: メモリ計測コマンドの構築 ---
+		// ワーカーの同時実行でファイルが衝突しないよう、一意のファイル名にする
+		memFile := fmt.Sprintf("/tmp/mem_%s_%s_%s.txt", sub.UserID, sub.ProblemID, baseName)
+		// /usr/bin/time -f '%M' でピークメモリ(KB)をファイルに出力
+		runCmdWithLimit := fmt.Sprintf("ulimit -v %d; /usr/bin/time -f '%%M' -o %s timeout %f %s", memoryLimitKB, memFile, pConfig.TimeLimit, runCmd)
+		
 		inFile, _ := os.Open(inPath)
 		cmd := exec.Command("docker", "exec", "-i", sandboxContainer, "sh", "-c", runCmdWithLimit)
-		cmd.Stdin = inFile
-
 		var outBuf bytes.Buffer
+		cmd.Stdin = inFile
 		cmd.Stdout = &outBuf
 
-		// ⏱️ 計測開始
 		caseStart := time.Now()
-
 		cmd.Start()
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()
 
 		var elapsedMs int64
+		var isIE, isTimeout, isRE bool
 
 		select {
 		case <-time.After(goTimeout):
 			cmd.Process.Kill()
-			inFile.Close()
-			elapsedMs = time.Since(caseStart).Milliseconds()
-			if elapsedMs > maxTimeMs { maxTimeMs = elapsedMs }
-			log.Printf("[CASE] %s さんの提出 (問題: %s, ケース: %s) -> タイムアウト (Time: %d ms)", sub.Username, sub.ProblemID, baseName, elapsedMs)
-			
-			detailLines = append(detailLines, fmt.Sprintf("`%s`: 💀 IE/TLE (%d ms)", baseName, elapsedMs))
-			return "IE (ジャッジシステム遅延エラー)", formatDetails(maxTimeMs, detailLines)
-
+			isIE = true
 		case err := <-done:
-			inFile.Close()
-			elapsedMs = time.Since(caseStart).Milliseconds()
-			if elapsedMs > maxTimeMs { maxTimeMs = elapsedMs }
-
 			if err != nil {
-				if exitError, ok := err.(*exec.ExitError); ok {
-					if exitError.ExitCode() == 124 {
-						log.Printf("[CASE] %s さんの提出 (問題: %s, ケース: %s) -> TLE (Time: %d ms)", sub.Username, sub.ProblemID, baseName, elapsedMs)
-						detailLines = append(detailLines, fmt.Sprintf("`%s`: ⏳ TLE (%d ms)", baseName, elapsedMs))
-						return "TLE (実行時間制限超過)", formatDetails(maxTimeMs, detailLines)
-					}
+				if exitError, ok := err.(*exec.ExitError); ok && exitError.ExitCode() == 124 {
+					isTimeout = true
+				} else {
+					isRE = true
 				}
-				log.Printf("[CASE] %s さんの提出 (問題: %s, ケース: %s) -> RE (Time: %d ms)", sub.Username, sub.ProblemID, baseName, elapsedMs)
-				detailLines = append(detailLines, fmt.Sprintf("`%s`: ⚠️ RE (%d ms)", baseName, elapsedMs))
-				return "RE (実行時エラー / メモリ制限超過)", formatDetails(maxTimeMs, detailLines)
 			}
+		}
+		inFile.Close()
+		
+		elapsedMs = time.Since(caseStart).Milliseconds()
+		if elapsedMs > maxTimeMs { maxTimeMs = elapsedMs }
+
+		// --- 💡変更点: メモリ使用量の読み取りと後片付け ---
+		memCmd := exec.Command("docker", "exec", sandboxContainer, "cat", memFile)
+		memOut, _ := memCmd.Output()
+		memKb, _ := strconv.ParseInt(strings.TrimSpace(string(memOut)), 10, 64)
+		if memKb > maxMemoryKB { maxMemoryKB = memKb }
+		memMb := float64(memKb) / 1024.0
+		
+		// 読み終わったメモリファイルをコンテナから削除
+		exec.Command("docker", "exec", sandboxContainer, "rm", "-f", memFile).Run()
+
+		// エラー判定とDiscord表示の作成
+		if isIE {
+			log.Printf("[CASE] %s (問題: %s, %s) -> IE (%d ms, %.1f MB)", sub.Username, sub.ProblemID, baseName, elapsedMs, memMb)
+			detailLines = append(detailLines, fmt.Sprintf("`%s`: 💀 IE (%d ms, %.1f MB)", baseName, elapsedMs, memMb))
+			return "IE (ジャッジシステム遅延エラー)", formatDetails(maxTimeMs, maxMemoryKB, pConfig.TimeLimit, pConfig.MemoryLimit, detailLines)
+		}
+		if isTimeout {
+			log.Printf("[CASE] %s (問題: %s, %s) -> TLE (%d ms, %.1f MB)", sub.Username, sub.ProblemID, baseName, elapsedMs, memMb)
+			detailLines = append(detailLines, fmt.Sprintf("`%s`: ⏳ TLE (%d ms, %.1f MB)", baseName, elapsedMs, memMb))
+			return "TLE (実行時間制限超過)", formatDetails(maxTimeMs, maxMemoryKB, pConfig.TimeLimit, pConfig.MemoryLimit, detailLines)
+		}
+		if isRE {
+			log.Printf("[CASE] %s (問題: %s, %s) -> RE (%d ms, %.1f MB)", sub.Username, sub.ProblemID, baseName, elapsedMs, memMb)
+			detailLines = append(detailLines, fmt.Sprintf("`%s`: ⚠️ RE (%d ms, %.1f MB)", baseName, elapsedMs, memMb))
+			return "RE (実行時エラー / メモリ制限超過)", formatDetails(maxTimeMs, maxMemoryKB, pConfig.TimeLimit, pConfig.MemoryLimit, detailLines)
 		}
 
 		actualOutput := strings.TrimSpace(outBuf.String())
 		if actualOutput != expectedOutput {
-			log.Printf("[CASE] %s さんの提出 (問題: %s, ケース: %s) -> WA (Time: %d ms)", sub.Username, sub.ProblemID, baseName, elapsedMs)
-			detailLines = append(detailLines, fmt.Sprintf("`%s`: ❌ WA (%d ms)", baseName, elapsedMs))
+			log.Printf("[CASE] %s (問題: %s, %s) -> WA (%d ms, %.1f MB)", sub.Username, sub.ProblemID, baseName, elapsedMs, memMb)
+			detailLines = append(detailLines, fmt.Sprintf("`%s`: ❌ WA (%d ms, %.1f MB)", baseName, elapsedMs, memMb))
 			allAC = false
-			break // WAが1つでも出たら以降のケースは検証しない
+			break // WAで打ち切り
 		}
 
-		log.Printf("[CASE] %s さんの提出 (問題: %s, ケース: %s) -> AC (Time: %d ms)", sub.Username, sub.ProblemID, baseName, elapsedMs)
-		detailLines = append(detailLines, fmt.Sprintf("`%s`: ✅ AC (%d ms)", baseName, elapsedMs))
+		log.Printf("[CASE] %s (問題: %s, %s) -> AC (%d ms, %.1f MB)", sub.Username, sub.ProblemID, baseName, elapsedMs, memMb)
+		detailLines = append(detailLines, fmt.Sprintf("`%s`: ✅ AC (%d ms, %.1f MB)", baseName, elapsedMs, memMb))
 	}
 
 	if allAC {
-		return "AC (正解)", formatDetails(maxTimeMs, detailLines)
+		return "AC (正解)", formatDetails(maxTimeMs, maxMemoryKB, pConfig.TimeLimit, pConfig.MemoryLimit, detailLines)
 	}
-	return "WA (不正解)", formatDetails(maxTimeMs, detailLines)
+	return "WA (不正解)", formatDetails(maxTimeMs, maxMemoryKB, pConfig.TimeLimit, pConfig.MemoryLimit, detailLines)
 }
 
 // 文字数超過を防ぐための詳細テキストフォーマット関数
-func formatDetails(maxTimeMs int64, lines []string) string {
-	detailStr := fmt.Sprintf("⏱️ **最大実行時間**: `%d ms`\n**[テストケース詳細]**\n%s", maxTimeMs, strings.Join(lines, "\n"))
+func formatDetails(maxTimeMs int64, maxMemKB int64, limitTime float64, limitMem int, lines []string) string {
+	maxMemMB := float64(maxMemKB) / 1024.0
+	limitTimeMs := int64(limitTime * 1000)
+	
+	detailStr := fmt.Sprintf("⏱️ **実行時間**: `%d ms` / 制限 `%d ms`\n💾 **メモリ**: `%.1f MB` / 制限 `%d MB`\n**[テストケース詳細]**\n%s", 
+		maxTimeMs, limitTimeMs, maxMemMB, limitMem, strings.Join(lines, "\n"))
+	
 	if len(detailStr) > 1500 {
 		return detailStr[:1500] + "\n... (Discordの文字数制限のため以降省略)"
 	}
@@ -327,11 +323,17 @@ func formatDetails(maxTimeMs int64, lines []string) string {
 func getRequiredPackages() (pkgs []string, cmds []string) {
 	pkgSet := make(map[string]bool)
 	for _, config := range SupportedLanguages {
-		if !pkgSet[config.Package] {
+		if config.Package != "" && !pkgSet[config.Package] {
 			pkgSet[config.Package] = true
 			pkgs = append(pkgs, config.Package)
 			cmds = append(cmds, config.CheckCmd)
 		}
+	}
+	// --- 追加: メモリ計測用の 'time' パッケージを強制追加 ---
+	if !pkgSet["time"] {
+		pkgSet["time"] = true
+		pkgs = append(pkgs, "time")
+		cmds = append(cmds, "/usr/bin/time")
 	}
 	return pkgs, cmds
 }
