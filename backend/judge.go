@@ -137,7 +137,8 @@ func judgeWorker(s *discordgo.Session, workerID int) {
 	for sub := range JudgeQueue {
 		log.Printf("[Worker %d] %s さんの提出 (問題: %s) を処理開始...\n", workerID, sub.Username, sub.ProblemID)
 
-		result := runJudgeLogic(sub)
+		// 戻り値を「メインの結果」と「詳細テキスト」の2つに変更
+		result, details := runJudgeLogic(sub)
 
 		duration := time.Since(sub.SubmittedAt)
 		log.Printf("[JUDGE FINISHED] User: %s, Problem: %s, Result: %s, Elapsed: %v\n", sub.Username, sub.ProblemID, result, duration)
@@ -147,12 +148,17 @@ func judgeWorker(s *discordgo.Session, workerID int) {
 			prefix = "🔧 **[ADMIN TEST RESULT]**\n"
 		}
 
+		// Discordへ送信するメッセージの組み立て
 		resultMsg := fmt.Sprintf("%s✅ ジャッジ完了\n問題: `%s`\n結果: **%s**\n所要時間: %v", prefix, sub.ProblemID, result, duration)
+		if details != "" {
+			resultMsg += "\n\n" + details
+		}
+
 		s.ChannelMessageSend(sub.DMChannelID, resultMsg)
 	}
 }
 
-func runJudgeLogic(sub Submission) string {
+func runJudgeLogic(sub Submission) (string, string) {
 	ext := filepath.Ext(sub.Filename)
 	problemDir := filepath.Join("problems", sub.ProblemID)
 	inDir := filepath.Join(problemDir, "in")
@@ -161,7 +167,7 @@ func runJudgeLogic(sub Submission) string {
 	inFiles, err := os.ReadDir(inDir)
 	if err != nil {
 		log.Printf("[ERROR] テストケースが見つかりません。探したパス: %s, エラー詳細: %v\n", inDir, err)
-		return "IE (Internal Error: inディレクトリがありません)"
+		return "IE (Internal Error: inディレクトリがありません)", ""
 	}
 
 	hasInFile := false
@@ -174,20 +180,18 @@ func runJudgeLogic(sub Submission) string {
 
 	if !hasInFile {
 		log.Printf("[ERROR] %s の中に .in 拡張子のファイルが1つもありません。\n", inDir)
-		return "IE (Internal Error: .inファイルが見つかりません)"
+		return "IE (Internal Error: .inファイルが見つかりません)", ""
 	}
 
 	sandboxContainer := "discoder-sandbox"
 	langConfig, ok := SupportedLanguages[ext]
 	if !ok {
-		return "CE (未対応の言語)"
+		return "CE (未対応の言語)", ""
 	}
 
-	// 1. JSONの設定内にある {filepath} を実際のパスに置換してコマンドを生成
 	compileCmd := strings.ReplaceAll(langConfig.CompileCmd, "{filepath}", filepath.ToSlash(sub.FilePath))
 	runCmd := strings.ReplaceAll(langConfig.RunCmd, "{filepath}", filepath.ToSlash(sub.FilePath))
 
-	// 2. コンパイルの実行
 	if compileCmd != "" {
 		cmd := exec.Command("docker", "exec", sandboxContainer, "sh", "-c", compileCmd)
 		out, err := cmd.CombinedOutput()
@@ -200,14 +204,13 @@ func runJudgeLogic(sub Submission) string {
 			if len(errMsg) > 1000 {
 				errMsg = string([]rune(errMsg)[:1000]) + "\n... (以降省略)"
 			}
-			return fmt.Sprintf("CE (コンパイルエラー)\n```text\n%s\n```", errMsg)
+			return "CE (コンパイルエラー)", fmt.Sprintf("```text\n%s\n```", errMsg)
 		}
 	}
 
-	// --- 3. 問題のコンフィグ (config.json) の読み込み ---
 	type ProblemConfig struct {
 		TimeLimit   float64 `json:"time_limit"`
-		MemoryLimit int     `json:"memory_limit"` // MB単位
+		MemoryLimit int     `json:"memory_limit"`
 	}
 
 	configPath := filepath.Join(problemDir, "config.json")
@@ -217,23 +220,22 @@ func runJudgeLogic(sub Submission) string {
 		json.Unmarshal(configData, &pConfig)
 	}
 
-	// 読み込めなかったり不正な値の場合はデフォルト値をセット
 	if pConfig.TimeLimit <= 0 {
-		pConfig.TimeLimit = 2.0 // デフォルト2秒
+		pConfig.TimeLimit = 2.0
 	}
 	if pConfig.MemoryLimit <= 0 {
-		pConfig.MemoryLimit = 1024 // デフォルト1024MB
+		pConfig.MemoryLimit = 1024
 	}
 
-	// 時間制限とメモリ制限をコマンドに適用
-	timeoutDuration := time.Duration(pConfig.TimeLimit * float64(time.Second))
 	memoryLimitKB := pConfig.MemoryLimit * 1024
-	
-	// ulimit -v でコンテナ内の仮想メモリを制限して実行する
-	runCmdWithLimit := fmt.Sprintf("ulimit -v %d; %s", memoryLimitKB, runCmd)
+	runCmdWithLimit := fmt.Sprintf("ulimit -v %d; timeout %f %s", memoryLimitKB, pConfig.TimeLimit, runCmd)
+	goTimeout := time.Duration((pConfig.TimeLimit + 1.0) * float64(time.Second))
 
-	// 4. 全テストケースに対して実行・照合
+	// 詳細情報を保存する変数
+	var detailLines []string
+	var maxTimeMs int64 = 0
 	allAC := true
+
 	for _, file := range inFiles {
 		if !strings.HasSuffix(file.Name(), ".in") {
 			continue
@@ -245,7 +247,7 @@ func runJudgeLogic(sub Submission) string {
 
 		expectedOutputBytes, err := os.ReadFile(outPath)
 		if err != nil {
-			return "IE (出力ファイル読込エラー)"
+			return "IE (出力ファイル読込エラー)", ""
 		}
 		expectedOutput := strings.TrimSpace(string(expectedOutputBytes))
 
@@ -256,34 +258,70 @@ func runJudgeLogic(sub Submission) string {
 		var outBuf bytes.Buffer
 		cmd.Stdout = &outBuf
 
+		// ⏱️ 計測開始
+		caseStart := time.Now()
+
 		cmd.Start()
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()
 
+		var elapsedMs int64
+
 		select {
-		case <-time.After(timeoutDuration): // TLE判定に config.json の値を使用
+		case <-time.After(goTimeout):
 			cmd.Process.Kill()
 			inFile.Close()
-			return "TLE (実行時間制限超過)"
+			elapsedMs = time.Since(caseStart).Milliseconds()
+			if elapsedMs > maxTimeMs { maxTimeMs = elapsedMs }
+			log.Printf("[CASE] %s さんの提出 (問題: %s, ケース: %s) -> タイムアウト (Time: %d ms)", sub.Username, sub.ProblemID, baseName, elapsedMs)
+			
+			detailLines = append(detailLines, fmt.Sprintf("`%s`: 💀 IE/TLE (%d ms)", baseName, elapsedMs))
+			return "IE (ジャッジシステム遅延エラー)", formatDetails(maxTimeMs, detailLines)
+
 		case err := <-done:
 			inFile.Close()
+			elapsedMs = time.Since(caseStart).Milliseconds()
+			if elapsedMs > maxTimeMs { maxTimeMs = elapsedMs }
+
 			if err != nil {
-				// ulimit に引っかかった場合（メモリ確保失敗）や、単純な配列外参照などは全て非ゼロ終了（RE）になる
-				return "RE (実行時エラー / メモリ制限超過の可能性)"
+				if exitError, ok := err.(*exec.ExitError); ok {
+					if exitError.ExitCode() == 124 {
+						log.Printf("[CASE] %s さんの提出 (問題: %s, ケース: %s) -> TLE (Time: %d ms)", sub.Username, sub.ProblemID, baseName, elapsedMs)
+						detailLines = append(detailLines, fmt.Sprintf("`%s`: ⏳ TLE (%d ms)", baseName, elapsedMs))
+						return "TLE (実行時間制限超過)", formatDetails(maxTimeMs, detailLines)
+					}
+				}
+				log.Printf("[CASE] %s さんの提出 (問題: %s, ケース: %s) -> RE (Time: %d ms)", sub.Username, sub.ProblemID, baseName, elapsedMs)
+				detailLines = append(detailLines, fmt.Sprintf("`%s`: ⚠️ RE (%d ms)", baseName, elapsedMs))
+				return "RE (実行時エラー / メモリ制限超過)", formatDetails(maxTimeMs, detailLines)
 			}
 		}
 
 		actualOutput := strings.TrimSpace(outBuf.String())
 		if actualOutput != expectedOutput {
+			log.Printf("[CASE] %s さんの提出 (問題: %s, ケース: %s) -> WA (Time: %d ms)", sub.Username, sub.ProblemID, baseName, elapsedMs)
+			detailLines = append(detailLines, fmt.Sprintf("`%s`: ❌ WA (%d ms)", baseName, elapsedMs))
 			allAC = false
-			break
+			break // WAが1つでも出たら以降のケースは検証しない
 		}
+
+		log.Printf("[CASE] %s さんの提出 (問題: %s, ケース: %s) -> AC (Time: %d ms)", sub.Username, sub.ProblemID, baseName, elapsedMs)
+		detailLines = append(detailLines, fmt.Sprintf("`%s`: ✅ AC (%d ms)", baseName, elapsedMs))
 	}
 
 	if allAC {
-		return "AC (正解)"
+		return "AC (正解)", formatDetails(maxTimeMs, detailLines)
 	}
-	return "WA (不正解)"
+	return "WA (不正解)", formatDetails(maxTimeMs, detailLines)
+}
+
+// 文字数超過を防ぐための詳細テキストフォーマット関数
+func formatDetails(maxTimeMs int64, lines []string) string {
+	detailStr := fmt.Sprintf("⏱️ **最大実行時間**: `%d ms`\n**[テストケース詳細]**\n%s", maxTimeMs, strings.Join(lines, "\n"))
+	if len(detailStr) > 1500 {
+		return detailStr[:1500] + "\n... (Discordの文字数制限のため以降省略)"
+	}
+	return detailStr
 }
 
 func getRequiredPackages() (pkgs []string, cmds []string) {
