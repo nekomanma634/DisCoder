@@ -247,7 +247,7 @@ func handleCreateProblem(s *discordgo.Session, i *discordgo.InteractionCreate, u
 		case "testcases":
 			zipAtt = data.Resolved.Attachments[opt.Value.(string)]
 		case "config":
-			configAtt = data.Resolved.Attachments[opt.Value.(string)] // 追加: configファイル
+			configAtt = data.Resolved.Attachments[opt.Value.(string)]
 		}
 	}
 
@@ -272,37 +272,38 @@ func handleCreateProblem(s *discordgo.Session, i *discordgo.InteractionCreate, u
 
 	baseDir := filepath.Join("problems", problemName)
 	if err := os.MkdirAll(baseDir, os.ModePerm); err != nil {
+		log.Printf("[ERROR] [SYSTEM] 問題ディレクトリの作成に失敗 (ID: %s): %v\n", problemName, err)
 		editEphemeral(s, i, "サーバーエラー: ディレクトリの作成に失敗しました。")
 		return
 	}
 
-	// 問題文(.md)の保存
 	if err := downloadAttachment(mdAtt.URL, filepath.Join(baseDir, "statement.md")); err != nil {
+		log.Printf("[ERROR] [SYSTEM] 問題文の保存に失敗 (ID: %s): %v\n", problemName, err)
 		editEphemeral(s, i, "エラー: 問題文のダウンロードに失敗しました。")
 		return
 	}
 
-	// ZIPのダウンロードと解凍
 	zipPath := filepath.Join(baseDir, "testcases.zip")
 	if err := downloadAttachment(zipAtt.URL, zipPath); err != nil {
+		log.Printf("[ERROR] [SYSTEM] テストケースZIPの保存に失敗 (ID: %s): %v\n", problemName, err)
 		editEphemeral(s, i, "エラー: テストケース(ZIP)のダウンロードに失敗しました。")
 		return
 	}
 	if err := unzip(zipPath, baseDir); err != nil {
+		log.Printf("[ERROR] [SYSTEM] テストケースZIPの解凍に失敗 (ID: %s): %v\n", problemName, err)
 		editEphemeral(s, i, fmt.Sprintf("エラー: ZIPの解凍に失敗しました: %v", err))
 		return
 	}
-	os.Remove(zipPath) // 元のZIPは削除
+	os.Remove(zipPath)
 
-	// --- 追加: config.json の保存処理 ---
 	configPath := filepath.Join(baseDir, "config.json")
 	if configAtt != nil && strings.HasSuffix(strings.ToLower(configAtt.Filename), ".json") {
 		if err := downloadAttachment(configAtt.URL, configPath); err != nil {
+			log.Printf("[ERROR] [SYSTEM] config.jsonの保存に失敗 (ID: %s): %v\n", problemName, err)
 			editEphemeral(s, i, "エラー: config.jsonのダウンロードに失敗しました。")
 			return
 		}
 	} else {
-		// 添付がない場合はデフォルト設定を作成 (2.0秒 / 1024MB)
 		defaultConfig := []byte(`{
   "time_limit": 2.0,
   "memory_limit": 1024
@@ -310,10 +311,8 @@ func handleCreateProblem(s *discordgo.Session, i *discordgo.InteractionCreate, u
 		os.WriteFile(configPath, defaultConfig, os.ModePerm)
 	}
 
-	// 階層ズレ補正ロジック
 	inDir := filepath.Join(baseDir, "in")
 	outDir := filepath.Join(baseDir, "out")
-
 	if _, err := os.Stat(inDir); os.IsNotExist(err) {
 		entries, _ := os.ReadDir(baseDir)
 		for _, e := range entries {
@@ -325,7 +324,7 @@ func handleCreateProblem(s *discordgo.Session, i *discordgo.InteractionCreate, u
 					os.Rename(nestedIn, inDir)
 					os.Rename(nestedOut, outDir)
 					os.RemoveAll(filepath.Join(baseDir, e.Name()))
-					log.Printf("[AUTO FIX] %s のテストケース階層ズレ (%s) を自動補正しました。\n", problemName, e.Name())
+					log.Printf("[INFO] [SYSTEM] %s のテストケース階層ズレ (%s) を自動補正しました。\n", problemName, e.Name())
 					break
 				}
 			}
@@ -333,12 +332,12 @@ func handleCreateProblem(s *discordgo.Session, i *discordgo.InteractionCreate, u
 	}
 
 	if err := registerProblemToDB(problemName, problemTitle, user.ID); err != nil {
-		log.Println("DB登録エラー:", err)
+		log.Printf("[ERROR] [DB] 問題のデータベース登録に失敗 (ID: %s): %v\n", problemName, err)
 		editEphemeral(s, i, "エラー: データベースへの登録に失敗しました。")
 		return
 	}
 
-	log.Printf("[PROBLEM CREATED] %s (ID: %s) が作成されました。\n", problemTitle, problemName)
+	log.Printf("[INFO] [SYSTEM] 問題 %s (ID: %s) が作成・登録されました。\n", problemTitle, problemName)
 	successMsg := fmt.Sprintf("✅ **問題の登録が完了しました！**\n\n**問題ID**: `%s`\n**表示名**: %s\n\nディレクトリ (`problems/%s/`) に展開されました。",
 		problemName, problemTitle, problemName)
 	editEphemeral(s, i, successMsg)
@@ -457,10 +456,8 @@ func handleShowProblem(s *discordgo.Session, i *discordgo.InteractionCreate, use
 }
 
 func handleSandbox(s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, data discordgo.ApplicationCommandInteractionData) {
-	// 即座に応答してタイムアウトを防ぐ
 	respondEphemeral(s, i, "⏳ サンドボックスの操作を実行中です...")
 
-	// 権限チェック
 	role, isReg, err := getUserRole(user.ID)
 	if err != nil || !isReg || role != "admin" {
 		editEphemeral(s, i, "⛔ 権限がありません。このコマンドは Admin 専用です。")
@@ -490,14 +487,12 @@ func handleSandbox(s *discordgo.Session, i *discordgo.InteractionCreate, user *d
 
 			statusText += "\n\n[インストール済み環境]"
 
-			// languages.json の設定を基に動的にバージョンを取得
 			for ext, config := range SupportedLanguages {
 				if config.VersionCmd == "" {
 					continue
 				}
 				vcCmd := exec.Command("docker", "exec", containerName, "sh", "-c", config.VersionCmd)
 				if vcOut, err := vcCmd.CombinedOutput(); err == nil && string(vcOut) != "" {
-					// どの拡張子の環境かわかるように表示（例: ・[.cpp] g++ 11.4.0）
 					statusText += fmt.Sprintf("\n・[%s] %s", ext, strings.TrimSpace(string(vcOut)))
 				}
 			}
@@ -507,10 +502,12 @@ func handleSandbox(s *discordgo.Session, i *discordgo.InteractionCreate, user *d
 
 	case "stop":
 		exec.Command("docker", "stop", containerName).Run()
+		log.Println("[INFO] [DOCKER] サンドボックスコンテナを手動で一時停止しました。")
 		editEphemeral(s, i, "✅ サンドボックスコンテナを一時停止しました。")
 
 	case "delete":
 		exec.Command("docker", "rm", "-f", containerName).Run()
+		log.Println("[INFO] [DOCKER] サンドボックスコンテナを手動で削除しました。")
 		editEphemeral(s, i, "🗑️ サンドボックスコンテナを完全に削除しました。\n※次回 `start` 実行時、またはシステム再起動時に初期状態から再構築されます。")
 
 	case "start":
@@ -519,29 +516,30 @@ func handleSandbox(s *discordgo.Session, i *discordgo.InteractionCreate, user *d
 
 		if strings.Contains(string(out), containerName) {
 			exec.Command("docker", "start", containerName).Run()
+			log.Println("[INFO] [DOCKER] 既存のサンドボックスコンテナを手動で起動しました。")
 			editEphemeral(s, i, "✅ 既存のサンドボックスコンテナを起動しました。")
 		} else {
 			pkgs, _ := getRequiredPackages()
 			pkgListStr := strings.Join(pkgs, ", ")
 
 			editEphemeral(s, i, "⏳ 新規コンテナを作成しています...")
+			log.Println("[INFO] [DOCKER] サンドボックスの新規構築を開始します。")
 
 			go func() {
 				cwd, _ := os.Getwd()
 				volumePath := filepath.ToSlash(cwd) + ":/host"
 
-				// 1. コンテナ作成
 				exec.Command("docker", "run", "-d", "--name", containerName, "-v", volumePath, "ubuntu:latest", "sleep", "infinity").Run()
 
-				// 2. パッケージ更新
 				editEphemeral(s, i, fmt.Sprintf("⏳ コンテナを作成しました。パッケージリストを更新中...\nインストール予定: `%s`", pkgListStr))
-				exec.Command("docker", "exec", containerName, "apt-get", "update").Run()
+				// エラーを防ぐ非対話設定
+				exec.Command("docker", "exec", "-e", "DEBIAN_FRONTEND=noninteractive", containerName, "apt-get", "update").Run()
 
-				// 3. コンパイラのインストール
 				editEphemeral(s, i, fmt.Sprintf("⏳ コンパイラをインストールしています...\n対象: `%s`\n※1〜2分かかります。このままお待ちください。", pkgListStr))
-				installArgs := append([]string{"exec", containerName, "apt-get", "install", "-y"}, pkgs...)
+				installArgs := append([]string{"exec", "-e", "DEBIAN_FRONTEND=noninteractive", containerName, "apt-get", "install", "-y", "--no-install-recommends"}, pkgs...)
 				exec.Command("docker", installArgs...).Run()
 
+				log.Println("[INFO] [DOCKER] サンドボックスの新規構築とセットアップが完了しました。")
 				editEphemeral(s, i, "🎉 サンドボックスの新規構築とセットアップが完了しました！ジャッジ可能な状態です。")
 			}()
 		}
