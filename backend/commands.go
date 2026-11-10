@@ -13,9 +13,33 @@ func registerCommands(dg *discordgo.Session) {
 			Description: "ソースコードを提出します",
 			Options: []*discordgo.ApplicationCommandOption{
 				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "problem",
+					Description: "提出先の問題ID (例: abc001_a)",
+					Required:    true,
+				},
+				{
 					Type:        discordgo.ApplicationCommandOptionAttachment,
 					Name:        "file",
-					Description: "提出するファイル",
+					Description: "提出するソースコード",
+					Required:    true,
+				},
+			},
+		},
+		{
+			Name:        "test_problem",
+			Description: "【Admin専用】登録された問題のテストケースに対してコードを実行・検証します",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "problem",
+					Description: "テストする問題ID",
+					Required:    true,
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionAttachment,
+					Name:        "file",
+					Description: "正解と想定されるソースコード",
 					Required:    true,
 				},
 			},
@@ -26,7 +50,7 @@ func registerCommands(dg *discordgo.Session) {
 		},
 		{
 			Name:        "register",
-			Description: "Discoderシステムにユーザー登録します", // オプション入力を削除
+			Description: "Discoderシステムにユーザー登録します",
 		},
 		{
 			Name:        "profile",
@@ -83,6 +107,13 @@ func registerCommands(dg *discordgo.Session) {
 					Description: "テストケース (.zip形式。中に in/ と out/ フォルダを含める)",
 					Required:    true,
 				},
+				// --- 今回追加した config オプション ---
+				{
+					Type:        discordgo.ApplicationCommandOptionAttachment,
+					Name:        "config",
+					Description: "問題の設定ファイル (.json形式 / 時間・メモリ制限)",
+					Required:    false, // 必須ではない（未指定時はデフォルト値を使用）
+				},
 			},
 		},
 		{
@@ -98,6 +129,24 @@ func registerCommands(dg *discordgo.Session) {
 					Name:        "name",
 					Description: "表示する問題ID (例: abc001_a)",
 					Required:    true,
+				},
+			},
+		},
+		{
+			Name:        "sandbox",
+			Description: "【Admin専用】ジャッジ用サンドボックスコンテナの管理を行います",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "action",
+					Description: "実行する操作",
+					Required:    true,
+					Choices: []*discordgo.ApplicationCommandOptionChoice{
+						{Name: "状態確認 (status)", Value: "status"},
+						{Name: "起動・構築 (start)", Value: "start"},
+						{Name: "停止 (stop)", Value: "stop"},
+						{Name: "完全削除 (delete)", Value: "delete"},
+					},
 				},
 			},
 		},
@@ -133,6 +182,8 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		handleHello(s, i, user, dmChannel.ID)
 	case "submit":
 		handleSubmit(s, i, user, dmChannel.ID, data)
+	case "test_problem":
+		handleTestProblem(s, i, user, dmChannel.ID, data)
 	case "register":
 		handleRegister(s, i, user, data)
 	case "profile":
@@ -145,5 +196,7 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		handleProblems(s, i, user)
 	case "show_problem":
 		handleShowProblem(s, i, user, data)
+	case "sandbox":
+		handleSandbox(s, i, user, data)
 	}
 }

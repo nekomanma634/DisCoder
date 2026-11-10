@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
-	"regexp"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -34,65 +35,112 @@ func handleSubmit(s *discordgo.Session, i *discordgo.InteractionCreate, user *di
 		},
 	})
 
+	var problemID string
 	var attachment *discordgo.MessageAttachment
-	for _, att := range data.Resolved.Attachments {
-		attachment = att
-		break
+
+	for _, opt := range data.Options {
+		switch opt.Name {
+		case "problem":
+			problemID = opt.StringValue()
+		case "file":
+			attachment = data.Resolved.Attachments[opt.Value.(string)]
+		}
 	}
 
-	if attachment == nil {
-		s.ChannelMessageSend(dmChannelID, "エラー: ファイルが添付されていません。")
+	// 問題が存在するかチェック
+	if !isProblemExists(problemID) {
+		s.ChannelMessageSend(dmChannelID, fmt.Sprintf("エラー: 問題ID `%s` は存在しません。", problemID))
 		return
 	}
 
-	allowedFiles := os.Getenv("ALLOWED_FILENAMES")
-	if allowedFiles != "" {
-		isValidFile := false
-		for _, allowed := range strings.Split(allowedFiles, ",") {
-			if attachment.Filename == strings.TrimSpace(allowed) {
-				isValidFile = true
-				break
-			}
+	// 拡張子チェック (例: main.cpp -> .cpp)
+	ext := filepath.Ext(attachment.Filename)
+	if _, ok := SupportedLanguages[ext]; !ok {
+		var exts []string
+		for k := range SupportedLanguages {
+			exts = append(exts, k)
 		}
-		if !isValidFile {
-			errMsg := fmt.Sprintf("エラー: 提出できるファイル名は `%s` のみです。\nあなたの提出ファイル: `%s`", allowedFiles, attachment.Filename)
-			s.ChannelMessageSend(dmChannelID, errMsg)
-			return
-		}
+		errMsg := fmt.Sprintf("エラー: 許可されていないファイル形式です。対応言語: `%s`", strings.Join(exts, ", "))
+		s.ChannelMessageSend(dmChannelID, errMsg)
+		return
 	}
 
 	userDirName := fmt.Sprintf("%s_%s", user.Username, user.ID)
-	submitDir := filepath.Join("submissions", userDirName)
-	if err := os.MkdirAll(submitDir, os.ModePerm); err != nil {
-		s.ChannelMessageSend(dmChannelID, "サーバーエラー: 保存先ディレクトリを作成できませんでした。")
-		return
-	}
+	submitDir := filepath.Join("submissions", userDirName, problemID)
+	os.MkdirAll(submitDir, os.ModePerm)
 
 	filePath := filepath.Join(submitDir, attachment.Filename)
 	if err := downloadAttachment(attachment.URL, filePath); err != nil {
 		s.ChannelMessageSend(dmChannelID, "エラー: ファイルの保存に失敗しました。")
-		log.Println("ダウンロードエラー:", err)
 		return
 	}
 
 	now := time.Now()
-	log.Printf("[SUBMIT] User: %s (ID: %s), File: %s, Path: %s\n", user.Username, user.ID, attachment.Filename, filePath)
-
 	submissionData := Submission{
 		UserID:      user.ID,
 		Username:    user.Username,
+		ProblemID:   problemID,
 		Filename:    attachment.Filename,
 		FilePath:    filePath,
 		DMChannelID: dmChannelID,
 		SubmittedAt: now,
+		IsTest:      false,
 	}
 
-	msg := fmt.Sprintf("提出を受け付けました！\nファイル名: `%s`\n現在ジャッジの順番待ちキューに入っています...", attachment.Filename)
-	s.ChannelMessageSend(dmChannelID, msg)
+	s.ChannelMessageSend(dmChannelID, fmt.Sprintf("✅ 提出を受け付けました！\n問題: `%s`\nファイル: `%s`\n現在ジャッジ中です...", problemID, attachment.Filename))
 
-	if q, exists := problemQueues[attachment.Filename]; exists {
-		q <- submissionData
+	// ジャッジキューに送信
+	JudgeQueue <- submissionData
+}
+
+func handleTestProblem(s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, dmChannelID string, data discordgo.ApplicationCommandInteractionData) {
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: "テスト処理を開始しました。結果はDMに送信されます。",
+			Flags:   discordgo.MessageFlagsEphemeral,
+		},
+	})
+
+	role, isReg, err := getUserRole(user.ID)
+	if err != nil || !isReg || role != "admin" {
+		s.ChannelMessageSend(dmChannelID, "⛔ 権限がありません。このコマンドは Admin 専用です。")
+		return
 	}
+
+	var problemID string
+	var attachment *discordgo.MessageAttachment
+	for _, opt := range data.Options {
+		if opt.Name == "problem" {
+			problemID = opt.StringValue()
+		} else if opt.Name == "file" {
+			attachment = data.Resolved.Attachments[opt.Value.(string)]
+		}
+	}
+
+	if !isProblemExists(problemID) {
+		s.ChannelMessageSend(dmChannelID, "エラー: 問題が存在しません。")
+		return
+	}
+
+	testDir := filepath.Join("submissions", "admin_test", problemID)
+	os.MkdirAll(testDir, os.ModePerm)
+	filePath := filepath.Join(testDir, attachment.Filename)
+	downloadAttachment(attachment.URL, filePath)
+
+	submissionData := Submission{
+		UserID:      user.ID,
+		Username:    user.Username,
+		ProblemID:   problemID,
+		Filename:    attachment.Filename,
+		FilePath:    filePath,
+		DMChannelID: dmChannelID,
+		SubmittedAt: time.Now(),
+		IsTest:      true, // テストモードフラグ
+	}
+
+	s.ChannelMessageSend(dmChannelID, fmt.Sprintf("🔧 **[ADMIN TEST]**\n問題: `%s` に対してテストを実行中...", problemID))
+	JudgeQueue <- submissionData
 }
 
 func handleRegister(s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, data discordgo.ApplicationCommandInteractionData) {
@@ -186,7 +234,7 @@ func handleCreateProblem(s *discordgo.Session, i *discordgo.InteractionCreate, u
 	}
 
 	var problemName, problemTitle string
-	var mdAtt, zipAtt *discordgo.MessageAttachment
+	var mdAtt, zipAtt, configAtt *discordgo.MessageAttachment
 
 	for _, opt := range data.Options {
 		switch opt.Name {
@@ -198,6 +246,8 @@ func handleCreateProblem(s *discordgo.Session, i *discordgo.InteractionCreate, u
 			mdAtt = data.Resolved.Attachments[opt.Value.(string)]
 		case "testcases":
 			zipAtt = data.Resolved.Attachments[opt.Value.(string)]
+		case "config":
+			configAtt = data.Resolved.Attachments[opt.Value.(string)] // 追加: configファイル
 		}
 	}
 
@@ -238,14 +288,49 @@ func handleCreateProblem(s *discordgo.Session, i *discordgo.InteractionCreate, u
 		editEphemeral(s, i, "エラー: テストケース(ZIP)のダウンロードに失敗しました。")
 		return
 	}
-
 	if err := unzip(zipPath, baseDir); err != nil {
 		editEphemeral(s, i, fmt.Sprintf("エラー: ZIPの解凍に失敗しました: %v", err))
 		return
 	}
+	os.Remove(zipPath) // 元のZIPは削除
 
-	// 展開が終わった元のZIPファイルは不要なので削除
-	os.Remove(zipPath)
+	// --- 追加: config.json の保存処理 ---
+	configPath := filepath.Join(baseDir, "config.json")
+	if configAtt != nil && strings.HasSuffix(strings.ToLower(configAtt.Filename), ".json") {
+		if err := downloadAttachment(configAtt.URL, configPath); err != nil {
+			editEphemeral(s, i, "エラー: config.jsonのダウンロードに失敗しました。")
+			return
+		}
+	} else {
+		// 添付がない場合はデフォルト設定を作成 (2.0秒 / 1024MB)
+		defaultConfig := []byte(`{
+  "time_limit": 2.0,
+  "memory_limit": 1024
+}`)
+		os.WriteFile(configPath, defaultConfig, os.ModePerm)
+	}
+
+	// 階層ズレ補正ロジック
+	inDir := filepath.Join(baseDir, "in")
+	outDir := filepath.Join(baseDir, "out")
+
+	if _, err := os.Stat(inDir); os.IsNotExist(err) {
+		entries, _ := os.ReadDir(baseDir)
+		for _, e := range entries {
+			if e.IsDir() && e.Name() != "in" && e.Name() != "out" {
+				nestedIn := filepath.Join(baseDir, e.Name(), "in")
+				nestedOut := filepath.Join(baseDir, e.Name(), "out")
+
+				if _, errIn := os.Stat(nestedIn); errIn == nil {
+					os.Rename(nestedIn, inDir)
+					os.Rename(nestedOut, outDir)
+					os.RemoveAll(filepath.Join(baseDir, e.Name()))
+					log.Printf("[AUTO FIX] %s のテストケース階層ズレ (%s) を自動補正しました。\n", problemName, e.Name())
+					break
+				}
+			}
+		}
+	}
 
 	if err := registerProblemToDB(problemName, problemTitle, user.ID); err != nil {
 		log.Println("DB登録エラー:", err)
@@ -254,7 +339,7 @@ func handleCreateProblem(s *discordgo.Session, i *discordgo.InteractionCreate, u
 	}
 
 	log.Printf("[PROBLEM CREATED] %s (ID: %s) が作成されました。\n", problemTitle, problemName)
-	successMsg := fmt.Sprintf("✅ **問題の登録が完了しました！**\n\n**問題ID**: `%s`\n**表示名**: %s\n\nディレクトリ (`problems/%s/`) に展開されました。", 
+	successMsg := fmt.Sprintf("✅ **問題の登録が完了しました！**\n\n**問題ID**: `%s`\n**表示名**: %s\n\nディレクトリ (`problems/%s/`) に展開されました。",
 		problemName, problemTitle, problemName)
 	editEphemeral(s, i, successMsg)
 }
@@ -296,7 +381,7 @@ func handleProblems(s *discordgo.Session, i *discordgo.InteractionCreate, user *
 	for _, p := range problems {
 		// 日付を見やすくフォーマット (例: 2026/10/22)
 		dateStr := p.CreatedAt.Format("2006/01/02")
-		
+
 		field := &discordgo.MessageEmbedField{
 			Name:   fmt.Sprintf("ID: `%s`", p.Name),
 			Value:  fmt.Sprintf("**%s**\n登録日: %s", p.Title, dateStr),
@@ -369,4 +454,96 @@ func handleShowProblem(s *discordgo.Session, i *discordgo.InteractionCreate, use
 			Flags:  discordgo.MessageFlagsEphemeral,
 		},
 	})
+}
+
+func handleSandbox(s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, data discordgo.ApplicationCommandInteractionData) {
+	// 即座に応答してタイムアウトを防ぐ
+	respondEphemeral(s, i, "⏳ サンドボックスの操作を実行中です...")
+
+	// 権限チェック
+	role, isReg, err := getUserRole(user.ID)
+	if err != nil || !isReg || role != "admin" {
+		editEphemeral(s, i, "⛔ 権限がありません。このコマンドは Admin 専用です。")
+		return
+	}
+
+	action := data.Options[0].StringValue()
+	containerName := "discoder-sandbox"
+
+	switch action {
+	case "status":
+		cmd := exec.Command("docker", "ps", "-a", "--filter", "name="+containerName, "--format", "コンテナID: {{.ID}}\nイメージ: {{.Image}}\n状態: {{.Status}}\n起動時間: {{.RunningFor}}")
+		out, _ := cmd.CombinedOutput()
+		if string(out) == "" {
+			editEphemeral(s, i, "ℹ️ コンテナ `discoder-sandbox` は現在存在しません。（未作成または削除済み）")
+			return
+		}
+
+		statusText := strings.TrimSpace(string(out))
+
+		if strings.Contains(statusText, "状態: Up") {
+			statsCmd := exec.Command("docker", "stats", "--no-stream", "--format", "CPU使用率: {{.CPUPerc}}\nメモリ使用量: {{.MemUsage}}", containerName)
+			statsOut, _ := statsCmd.CombinedOutput()
+			if string(statsOut) != "" {
+				statusText += "\n" + strings.TrimSpace(string(statsOut))
+			}
+
+			statusText += "\n\n[インストール済み環境]"
+
+			// languages.json の設定を基に動的にバージョンを取得
+			for ext, config := range SupportedLanguages {
+				if config.VersionCmd == "" {
+					continue
+				}
+				vcCmd := exec.Command("docker", "exec", containerName, "sh", "-c", config.VersionCmd)
+				if vcOut, err := vcCmd.CombinedOutput(); err == nil && string(vcOut) != "" {
+					// どの拡張子の環境かわかるように表示（例: ・[.cpp] g++ 11.4.0）
+					statusText += fmt.Sprintf("\n・[%s] %s", ext, strings.TrimSpace(string(vcOut)))
+				}
+			}
+		}
+
+		editEphemeral(s, i, fmt.Sprintf("📊 **サンドボックス詳細ステータス**\n```text\n%s\n```", statusText))
+
+	case "stop":
+		exec.Command("docker", "stop", containerName).Run()
+		editEphemeral(s, i, "✅ サンドボックスコンテナを一時停止しました。")
+
+	case "delete":
+		exec.Command("docker", "rm", "-f", containerName).Run()
+		editEphemeral(s, i, "🗑️ サンドボックスコンテナを完全に削除しました。\n※次回 `start` 実行時、またはシステム再起動時に初期状態から再構築されます。")
+
+	case "start":
+		cmd := exec.Command("docker", "ps", "-a", "--format", "{{.Names}}", "-f", "name="+containerName)
+		out, _ := cmd.Output()
+
+		if strings.Contains(string(out), containerName) {
+			exec.Command("docker", "start", containerName).Run()
+			editEphemeral(s, i, "✅ 既存のサンドボックスコンテナを起動しました。")
+		} else {
+			pkgs, _ := getRequiredPackages()
+			pkgListStr := strings.Join(pkgs, ", ")
+
+			editEphemeral(s, i, "⏳ 新規コンテナを作成しています...")
+
+			go func() {
+				cwd, _ := os.Getwd()
+				volumePath := filepath.ToSlash(cwd) + ":/host"
+
+				// 1. コンテナ作成
+				exec.Command("docker", "run", "-d", "--name", containerName, "-v", volumePath, "ubuntu:latest", "sleep", "infinity").Run()
+
+				// 2. パッケージ更新
+				editEphemeral(s, i, fmt.Sprintf("⏳ コンテナを作成しました。パッケージリストを更新中...\nインストール予定: `%s`", pkgListStr))
+				exec.Command("docker", "exec", containerName, "apt-get", "update").Run()
+
+				// 3. コンパイラのインストール
+				editEphemeral(s, i, fmt.Sprintf("⏳ コンパイラをインストールしています...\n対象: `%s`\n※1〜2分かかります。このままお待ちください。", pkgListStr))
+				installArgs := append([]string{"exec", containerName, "apt-get", "install", "-y"}, pkgs...)
+				exec.Command("docker", installArgs...).Run()
+
+				editEphemeral(s, i, "🎉 サンドボックスの新規構築とセットアップが完了しました！ジャッジ可能な状態です。")
+			}()
+		}
+	}
 }

@@ -1,0 +1,79 @@
+{
+  ".cpp": {
+    "package": "g++",
+    "check_cmd": "g++",
+    "version_cmd": "g++ --version | head -n 1",
+    "compile_cmd": "g++ -O3 -std=gnu++20 /host/{filepath} -o /tmp/a.out",
+    "run_cmd": "/tmp/a.out"
+  },
+  ".py": {
+    "package": "python3",
+    "check_cmd": "python3",
+    "version_cmd": "python3 --version",
+    "compile_cmd": "",
+    "run_cmd": "python3 /host/{filepath}"
+  },
+  ".pypy": {
+    "package": "pypy3",
+    "check_cmd": "pypy3",
+    "version_cmd": "pypy3 --version",
+    "compile_cmd": "",
+    "run_cmd": "pypy3 /host/{filepath}"
+  },
+  ".rs": {
+    "package": "rustc",
+    "check_cmd": "rustc",
+    "version_cmd": "rustc --version",
+    "compile_cmd": "rustc -O -o /tmp/prog /host/{filepath}",
+    "run_cmd": "/tmp/prog"
+  },
+  ".java": {
+    "package": "default-jdk",
+    "check_cmd": "javac",
+    "version_cmd": "java -version 2>&1 | head -n 1",
+    "compile_cmd": "javac -d /tmp /host/{filepath}",
+    "run_cmd": "java -cp /tmp Main"
+  },
+  ".go": {
+    "package": "golang",
+    "check_cmd": "go",
+    "version_cmd": "go version",
+    "compile_cmd": "go build -o /tmp/prog /host/{filepath}",
+    "run_cmd": "/tmp/prog"
+  },
+  ".c": {
+    "package": "gcc",
+    "check_cmd": "gcc",
+    "version_cmd": "gcc --version | head -n 1",
+    "compile_cmd": "gcc -O3 -std=gnu11 /host/{filepath} -o /tmp/a.out",
+    "run_cmd": "/tmp/a.out"
+  },
+  ".cs": {
+    "package": "mono-complete",
+    "check_cmd": "mcs",
+    "version_cmd": "mcs --version",
+    "compile_cmd": "mcs -out:/tmp/prog.exe /host/{filepath}",
+    "run_cmd": "mono /tmp/prog.exe"
+  },
+  ".js": {
+    "package": "nodejs",
+    "check_cmd": "node",
+    "version_cmd": "node --version",
+    "compile_cmd": "",
+    "run_cmd": "node /host/{filepath}"
+  },
+  ".rb": {
+    "package": "ruby",
+    "check_cmd": "ruby",
+    "version_cmd": "ruby --version",
+    "compile_cmd": "",
+    "run_cmd": "ruby /host/{filepath}"
+  },
+  ".kt": {
+    "package": "kotlin",
+    "check_cmd": "kotlinc",
+    "version_cmd": "kotlin -version",
+    "compile_cmd": "kotlinc /host/{filepath} -include-runtime -d /tmp/prog.jar",
+    "run_cmd": "java -jar /tmp/prog.jar"
+  }
+}

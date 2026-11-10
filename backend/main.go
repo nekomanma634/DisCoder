@@ -22,6 +22,8 @@ func main() {
 	initDB()
 	defer db.Close()
 
+	initLanguages()
+
 	token := os.Getenv("DISCORD_TOKEN")
 	if token == "" {
 		log.Fatal("エラー: DISCORD_TOKEN が設定されていません。")
