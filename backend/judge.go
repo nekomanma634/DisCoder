@@ -25,6 +25,7 @@ type Submission struct {
 	DMChannelID string
 	SubmittedAt time.Time
 	IsTest      bool
+	ContestID   string
 }
 
 var JudgeQueue chan Submission
@@ -132,7 +133,6 @@ func judgeWorker(s *discordgo.Session, workerID int) {
 		log.Printf("[JUDGE] [Worker %d] %s さんの提出 (問題: %s) を処理開始...\n", workerID, sub.Username, sub.ProblemID)
 
 		result, details := runJudgeLogic(sub)
-
 		duration := time.Since(sub.SubmittedAt)
 		log.Printf("[JUDGE] [FINISHED] User: %s, Problem: %s, Result: %s, Elapsed: %v\n", sub.Username, sub.ProblemID, result, duration)
 
@@ -142,6 +142,18 @@ func judgeWorker(s *discordgo.Session, workerID int) {
 		}
 
 		resultMsg := fmt.Sprintf("%s✅ ジャッジ完了\n問題: `%s`\n結果: **%s**\n所要時間: %v", prefix, sub.ProblemID, result, duration)
+
+		if strings.HasPrefix(result, "AC") && sub.ContestID != "" && !sub.IsTest {
+			isFirst, addedScore, err := AddScoreIfFirstAC(sub.UserID, sub.ProblemID, sub.ContestID)
+			if err != nil {
+				log.Printf("[ERROR] [DB] スコア加算失敗: %v\n", err)
+			} else if isFirst {
+				resultMsg += fmt.Sprintf("\n\n🎉 **初AC！** コンテストスコアに **+%d点** 加算されました！", addedScore)
+			} else {
+				resultMsg += "\n\nℹ️ (この問題はすでにAC済みのため、スコア加算はありません)"
+			}
+		}
+
 		if details != "" {
 			resultMsg += "\n\n" + details
 		}
@@ -152,7 +164,12 @@ func judgeWorker(s *discordgo.Session, workerID int) {
 
 func runJudgeLogic(sub Submission) (string, string) {
 	ext := filepath.Ext(sub.Filename)
+	
 	problemDir := filepath.Join("problems", sub.ProblemID)
+	if sub.ContestID != "" {
+		problemDir = filepath.Join("contests", sub.ContestID, "problems", sub.ProblemID)
+	}
+	
 	inDir := filepath.Join(problemDir, "in")
 	outDir := filepath.Join(problemDir, "out")
 

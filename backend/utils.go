@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"bufio"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -178,6 +179,130 @@ func unzip(src string, dest string) error {
 
 		if err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func parseFrontmatter(filePath string) (map[string]string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	meta := make(map[string]string)
+	scanner := bufio.NewScanner(file)
+	
+	inFrontmatter := false
+	for scanner.Scan() {
+		// UTF-8のBOM (\xef\xbb\xbf) を見えない文字ごと除去
+		text := strings.TrimPrefix(scanner.Text(), "\xef\xbb\xbf")
+		line := strings.TrimSpace(text)
+
+		if !inFrontmatter {
+			if line == "---" {
+				inFrontmatter = true
+			} else if line != "" {
+				// 空行以外の文字が "---" より前に来たらメタデータなしと判断して終了
+				break
+			}
+			continue
+		}
+
+		// inFrontmatter == true の場合
+		if line == "---" {
+			break // メタデータブロック終了
+		}
+
+		// "Key: Value" の形を解析
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+			meta[strings.ToLower(key)] = val // 判別しやすいようキーをすべて小文字化
+		}
+	}
+	return meta, nil
+}
+
+// ファイルを移動する (別ドライブ間でも機能する安全な移動)
+func moveFile(srcPath, dstPath string) error {
+	inputFile, err := os.Open(srcPath)
+	if err != nil { return fmt.Errorf("ソースを開けません: %w", err) }
+	
+	outputFile, err := os.Create(dstPath)
+	if err != nil {
+		inputFile.Close()
+		return fmt.Errorf("保存先を作成できません: %w", err)
+	}
+	
+	_, err = io.Copy(outputFile, inputFile)
+	inputFile.Close()
+	outputFile.Close()
+	
+	if err != nil { return fmt.Errorf("コピーに失敗: %w", err) }
+	
+	// コピー完了後に元ファイルを削除
+	return os.Remove(srcPath)
+}
+
+// ファイル単体をコピーする関数
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+
+	// 権限(パーミッション)も引き継ぐ
+	if srcInfo, err := os.Stat(src); err == nil {
+		os.Chmod(dst, srcInfo.Mode())
+	}
+	return nil
+}
+
+// フォルダとその中身(in/outフォルダやファイル群)を再帰的にコピーする関数
+func copyDir(src, dst string) error {
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+
+	// コピー先のフォルダを作成
+	if err := os.MkdirAll(dst, srcInfo.Mode()); err != nil {
+		return err
+	}
+
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+
+		if entry.IsDir() {
+			// ディレクトリの場合は再帰的にコピー
+			if err := copyDir(srcPath, dstPath); err != nil {
+				return err
+			}
+		} else {
+			// ファイルの場合はコピー
+			if err := copyFile(srcPath, dstPath); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

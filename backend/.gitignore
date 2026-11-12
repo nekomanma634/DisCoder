@@ -9,5 +9,7 @@ discoder-backend
 submissions/
 
 problems/
+contests/
+temp/
 *.log
 *.db
