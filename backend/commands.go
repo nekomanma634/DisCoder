@@ -24,6 +24,12 @@ func registerCommands(dg *discordgo.Session) {
 					Description: "提出するソースコード",
 					Required:    true,
 				},
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "contest",
+					Description: "参加中のコンテストID (コンテスト問題に提出する場合)",
+					Required:    true,
+				},
 			},
 		},
 		{
@@ -150,6 +156,72 @@ func registerCommands(dg *discordgo.Session) {
 				},
 			},
 		},
+		{
+			Name:        "upload_doc",
+			Description: "【Admin/Staff専用】MDファイルをアップロードし、コンテストや問題を自動構築します",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionAttachment,
+					Name:        "file",
+					Description: "メタデータを含むMarkdownファイル (.md)",
+					Required:    true,
+				},
+			},
+		},
+		{
+			Name:        "copy_problem",
+			Description: "【Admin/Staff専用】既存の問題を指定したコンテストにコピー(追加)します",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "problem",
+					Description: "コピーする問題のID (例: abc001_a)",
+					Required:    true,
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "contest",
+					Description: "コピー先のコンテストID (例: dbc001)",
+					Required:    true,
+				},
+			},
+		},
+		{
+			Name:        "join_contest",
+			Description: "指定したコンテストに参加登録(エントリー)します",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "contest",
+					Description: "参加するコンテストID (例: dbc001)",
+					Required:    true,
+				},
+			},
+		},
+		{
+			Name:        "contest_ranking",
+			Description: "コンテストの参加者一覧と現在のランキング(順位表)を表示します",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "contest",
+					Description: "ランキングを見るコンテストID (例: dbc001)",
+					Required:    true,
+				},
+			},
+		},
+		{
+			Name:        "export_web",
+			Description: "【Admin/Staff専用】フロントエンド(Web)用に指定したコンテストのデータを抽出出力します",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "contest",
+					Description: "出力するコンテストID (例: dbc001)",
+					Required:    true,
+				},
+			},
+		},
 	}
 
 	for _, cmd := range commands {
@@ -198,5 +270,15 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		handleShowProblem(s, i, user, data)
 	case "sandbox":
 		handleSandbox(s, i, user, data)
+	case "upload_doc":
+		handleUploadDoc(s, i, user, data)
+	case "copy_problem":
+		handleCopyProblem(s, i, user, data)
+	case "join_contest":
+		handleJoinContest(s, i, user, data)
+	case "contest_ranking":
+		handleContestRanking(s, i, user, data)
+	case "export_web":
+		handleExportWeb(s, i, user, data)
 	}
 }
